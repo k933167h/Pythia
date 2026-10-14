@@ -11,8 +11,10 @@ import asyncio
 import json
 import logging
 
+from . import calibration as cal
 from .config import CONFIG
 from .models import AgentView, Prediction, WorldBrief
+from .sanitize import DATA_RULE, wrap
 from .state import STATE
 
 log = logging.getLogger("pythia.swarm")
@@ -60,10 +62,12 @@ def _persona_messages(name: str, lens: str, brief_text: str, preds: list[Predict
         f"sharpen with what your lens uniquely sees. Make your case in your own voice: 1-2 sentences "
         f"citing the specific signals (or absences) that drive your number. "
         f'Return ONLY a JSON array, one object per prediction: '
-        f'{{"i": <index>, "p": <0-100>, "note": "<your 1-2 sentence argument>"}}. No prose, no markdown.'
+        f'{{"i": <index>, "p": <0-100>, "note": "<your 1-2 sentence argument>"}}. No prose, no markdown. '
+        + DATA_RULE
+        + (" Write each note in Korean (한국어)." if CONFIG.output_lang == "ko" else "")
     )
     user = (
-        f"=== LIVE WORLD SNAPSHOT ===\n{brief_text[:2600]}\n\n"
+        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(brief_text[:2600])}\n\n"
         f"=== CANDIDATE PREDICTIONS ===\n{listing}\n\n"
         f"Score every prediction from your lens. JSON array only."
     )
@@ -101,7 +105,8 @@ async def _ask(oracle, name: str, lens: str, brief_text: str,
     for brief_cap in (2600, 1100):
         try:
             text = await oracle._complete(_persona_messages(name, lens, brief_text[:brief_cap], preds),
-                                          max_tokens=CONFIG.swarm_max_tokens, model=persona_model)
+                                          max_tokens=CONFIG.swarm_max_tokens, model=persona_model,
+                                          purpose="swarm")
         except Exception as e:  # noqa: BLE001 — a transient local-model hiccup shouldn't drop the voice
             log.warning("swarm persona %s (%s) errored (%s: %r) — %s", name, used_model,
                         type(e).__name__, str(e),
@@ -183,7 +188,10 @@ async def deliberate(oracle, brief: WorldBrief | None, predictions: list[Predict
         # Keep the oracle's own estimate as base_probability for the "oracle → council" delta.
         pred.base_probability = pred.probability
         ws = [weights.get(v.name, 1.0) for v in views]
-        pred.probability = round(sum(w * p for w, p in zip(ws, ps)) / sum(ws), 2)
+        # Log-odds pooling (default) respects that 0.95→0.99 is a bigger move than
+        # 0.50→0.54; "median" shrugs off one rogue voice; "mean" is the legacy rule.
+        pred.probability = round(cal.aggregate(ps, ws, method=CONFIG.swarm_aggregation,
+                                               extremize=CONFIG.extremize), 3)
         pred.split = (max(ps) - min(ps)) >= _SPLIT_SPREAD
         enriched += 1
     delib["active"] = False

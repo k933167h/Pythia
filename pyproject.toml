@@ -1,6 +1,6 @@
 [project]
 name = "pythia"
-version = "0.1.0"
+version = "0.3.0"
 description = "A local, keyless world-watching prediction oracle — fuses Osiris live global feeds and a local agent swarm (MiroFish-style) with a local LLM to forecast what happens next, and exposes the whole world-view as an agent API."
 requires-python = ">=3.11"
 license = "MIT"
@@ -15,12 +15,19 @@ dependencies = [
     "mcp>=1.2",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.urls]
 Homepage = "https://github.com/jangles-byte/Pythia"
 Repository = "https://github.com/jangles-byte/Pythia"
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [tool.pythia]
 # placeholder for future tooling config

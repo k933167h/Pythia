@@ -762,7 +762,7 @@ def _kalshi_events(data: dict) -> list[WorldEvent]:
             category="market-odds", source="kalshi", lat=None, lng=None,
             url=m.get("url"),
             salience=round(min(0.8, 0.42 + 0.25 * vshare + 0.13 * contested), 3),
-            raw={},
+            raw={"prob": prob, "close": m.get("close"), "closed": m.get("status") in ("closed", "settled")},
         ))
     return out
 
@@ -897,15 +897,33 @@ class OsirisIntake:
                         ev = _to_event(d, source, category)
                         if ev:
                             out.append(ev)
+            else:
+                from . import observability as obs
+                obs.inc("pythia_feed_failures_total", source=source, reason=f"http_{r.status_code}")
         except (httpx.HTTPError, ValueError) as e:
             log.debug("feed %s failed: %s", path, e)
+            from . import observability as obs
+            obs.inc("pythia_feed_failures_total", source=source, reason=type(e).__name__)
         return out
 
     async def fetch(self, limit: int = 40) -> list[WorldEvent]:
         # Fetch feeds concurrently so one slow/dead feed (e.g. GDELT) can't starve the rest.
         async with httpx.AsyncClient(verify=HTTPX_VERIFY, timeout=25) as c:
-            batches = await asyncio.gather(*[self._fetch_feed(c, p, s, cat) for p, s, cat in FEEDS])
-        events: list[WorldEvent] = [ev for batch in batches for ev in batch]
+            # optional Korean official feeds (keyed; no-op without DATA_GO_KR_KEY) run in
+            # the same gather, so they add no latency to the pass
+            from . import korea_intake
+            batches = await asyncio.gather(*[self._fetch_feed(c, p, s, cat) for p, s, cat in FEEDS],
+                                           korea_intake.fetch(), return_exceptions=True)
+        events: list[WorldEvent] = []
+        for batch in batches:
+            if isinstance(batch, BaseException):
+                log.debug("feed batch failed: %s", batch)
+                continue
+            events.extend(batch)
+        if CONFIG.korea_focus:
+            for ev in events:
+                if korea_intake.in_korea(ev.lat, ev.lng) or ev.source in ("kma", "airkorea"):
+                    ev.salience = round(min(1.0, ev.salience + 0.15), 3)
         # dedupe by lowercased title, keep highest salience, sort
         seen: dict[str, WorldEvent] = {}
         for ev in events:

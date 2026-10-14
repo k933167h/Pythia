@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import WorldBrief, WorldEvent
+from .sanitize import clean
 
 
 def build_brief(events: list[WorldEvent]) -> WorldBrief:
@@ -21,9 +22,11 @@ def build_brief(events: list[WorldEvent]) -> WorldBrief:
         lines.append(f"\n[{cat.upper()}] ({len(by_cat[cat])} signals)")
         for e in evs:
             loc = f"  @{e.lat:.1f},{e.lng:.1f}" if e.lat is not None else ""
-            extra = f" — {e.summary[:140]}" if e.summary else ""
-            lines.append(f"  • {e.title}{extra}{loc}")
-            top.append(e.title)
+            title = clean(e.title, 240)
+            summary = clean(e.summary, 140)
+            extra = f" — {summary}" if summary else ""
+            lines.append(f"  • {title}{extra}{loc}")
+            top.append(title)
 
     text = "\n".join(lines).strip()
     return WorldBrief(

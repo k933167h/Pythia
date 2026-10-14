@@ -62,7 +62,10 @@ class Config:
     runs_dir: Path = _ROOT / "runs"
 
     osiris_url: str = field(default_factory=lambda: os.environ.get("OSIRIS_URL", "http://localhost:3000"))
-    engine_host: str = field(default_factory=lambda: os.environ.get("ENGINE_HOST", "0.0.0.0"))
+    # Secure by default: bind to loopback. The Osiris UI proxies to the engine
+    # server-side, so phones/Tailscale reach the UI on :3000 — the engine itself never
+    # needs to be exposed. Set ENGINE_HOST=0.0.0.0 *and* API tokens to expose it.
+    engine_host: str = field(default_factory=lambda: os.environ.get("ENGINE_HOST", "127.0.0.1"))
     engine_port: int = field(default_factory=lambda: _i("ENGINE_PORT", 8088))
 
     # ── Oracle LLM (defaults to MiroFish's configured local model) ──
@@ -119,6 +122,54 @@ class Config:
     brief_enabled: bool = field(default_factory=lambda: _b("MORNING_BRIEF_ENABLED", True))
     brief_max_tokens: int = field(default_factory=lambda: _i("BRIEF_MAX_TOKENS", 2600))
 
+    # ── Forecast quality (aggregation · market anchoring · recalibration) ──
+    # How the council's votes become one number: "logodds" (weighted mean in log-odds,
+    # optionally extremized), "median" (robust to one rogue voice), or "mean" (legacy).
+    swarm_aggregation: str = field(default_factory=lambda: os.environ.get("SWARM_AGGREGATION", "logodds").strip().lower())
+    # Extremizing factor a in logit(p)=a·Σwᵢlogit(pᵢ). Personas share one model and one
+    # context, so their errors are correlated — keep 1.0 unless fitted on your ledger.
+    extremize: float = field(default_factory=lambda: _f("EXTREMIZE", 1.0))
+    # Blend with a matched real-money market (Polymarket/Kalshi/Manifold) when one exists.
+    # Halawi et al. 2024: model+crowd average beat either alone. 0 disables.
+    market_blend_weight: float = field(default_factory=lambda: _f("MARKET_BLEND_WEIGHT", 0.5))
+    market_match_threshold: float = field(default_factory=lambda: _f("MARKET_MATCH_THRESHOLD", 0.4))
+    # Platt recalibration per horizon, fitted on the ledger's resolved forecasts once
+    # there are enough of them (Metaculus 2026 bot analysis: best post-hoc method).
+    calibration_enabled: bool = field(default_factory=lambda: _b("CALIBRATION_ENABLED", True))
+    calibration_min_n: int = field(default_factory=lambda: _i("CALIBRATION_MIN_N", 60))
+    # Fewer than this many related live signals = flag the forecast as low-evidence.
+    min_evidence: int = field(default_factory=lambda: _i("MIN_EVIDENCE", 2))
+    # Independent judge: a *different* model (ideally another family) grades forecasts,
+    # so the system isn't marking its own homework (Panickssery et al. 2024).
+    judge_model: str = field(default_factory=lambda: os.environ.get("JUDGE_MODEL", "").strip())
+    judge_base_url: str = field(default_factory=lambda: os.environ.get("JUDGE_BASE_URL", "").strip())
+    judge_api_key: str = field(default_factory=lambda: os.environ.get("JUDGE_API_KEY", "").strip())
+    # Share of LLM-judged resolutions routed to a human audit queue (0..1).
+    audit_sample_rate: float = field(default_factory=lambda: _f("AUDIT_SAMPLE_RATE", 0.1))
+    # Output language for forecasts/chat: "en" or "ko".
+    output_lang: str = field(default_factory=lambda: os.environ.get("ORACLE_LANG", "en").strip().lower())
+
+    # ── Security ──
+    # Tokens: PYTHIA_ADMIN_TOKEN (read + write) and PYTHIA_READ_TOKEN (read only).
+    # With no tokens set, only loopback clients are served ("local mode").
+    admin_token: str = field(default_factory=lambda: os.environ.get("PYTHIA_ADMIN_TOKEN", "").strip())
+    read_token: str = field(default_factory=lambda: os.environ.get("PYTHIA_READ_TOKEN", "").strip())
+    cors_origins: list[str] = field(default_factory=lambda: [o.strip() for o in os.environ.get(
+        "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if o.strip()])
+    # Requests per minute per client on LLM-costly endpoints (/chat, /whatif, /predict…).
+    llm_rate_per_min: int = field(default_factory=lambda: _i("LLM_RATE_PER_MIN", 12))
+    # Hard ceiling on LLM calls per rolling 24h (unbounded-consumption guard). 0 = off.
+    llm_daily_budget: int = field(default_factory=lambda: _i("LLM_DAILY_BUDGET", 0))
+    # Webhooks: private/loopback targets are refused unless explicitly allowed.
+    webhook_allow_private: bool = field(default_factory=lambda: _b("WEBHOOK_ALLOW_PRIVATE", False))
+    webhook_allowlist: list[str] = field(default_factory=lambda: [h.strip().lower() for h in os.environ.get(
+        "WEBHOOK_ALLOWLIST", "").split(",") if h.strip()])
+
+    # ── Korea (optional, keyed feeds) ──
+    kma_auth_key: str = field(default_factory=lambda: os.environ.get("KMA_APIHUB_KEY", "").strip())
+    airkorea_key: str = field(default_factory=lambda: os.environ.get("DATA_GO_KR_KEY", "").strip())
+    korea_focus: bool = field(default_factory=lambda: _b("KOREA_FOCUS", False))
+
     def summary(self) -> dict:
         return {
             "osiris_url": self.osiris_url,
@@ -127,7 +178,20 @@ class Config:
             "horizons": self.horizons,
             "loop_interval_sec": self.loop_interval_sec,
             "event_cap": self.event_cap,
+            "engine_version": ENGINE_VERSION,
+            "prompt_version": PROMPT_VERSION,
+            "aggregation": self.swarm_aggregation,
+            "market_blend_weight": self.market_blend_weight,
+            "calibration": self.calibration_enabled,
+            "judge_model": self.judge_model or "(oracle model — not independent)",
+            "auth": "token" if (self.admin_token or self.read_token) else "local-only",
+            "lang": self.output_lang,
         }
+
+
+ENGINE_VERSION = "0.3.0"
+# Bump whenever a prompt changes, so every ledger record says which prompt made it.
+PROMPT_VERSION = "2026-10-ax1"
 
 
 CONFIG = Config()

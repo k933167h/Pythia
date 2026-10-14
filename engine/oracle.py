@@ -10,10 +10,14 @@ import logging
 import re
 from typing import Awaitable, Callable, Optional
 
+import time
+
 import httpx
 
+from . import observability as obs
 from .config import CONFIG, HTTPX_VERIFY
 from .models import Prediction, WorldBrief
+from .sanitize import DATA_RULE, wrap
 
 log = logging.getLogger("pythia.oracle")
 StageCB = Optional[Callable[[str, str], Awaitable[None]]]
@@ -21,8 +25,18 @@ StageCB = Optional[Callable[[str, str], Awaitable[None]]]
 SYSTEM = (
     "You are PYTHIA, a forecasting oracle. You watch a live snapshot of world activity "
     "(conflicts, disasters, seismic events, geopolitics, news) and predict concrete future "
-    "events. Be specific, plausible, and grounded in the snapshot. Output strictly JSON."
+    "events. Be specific, plausible, and grounded in the snapshot. Start from base rates — "
+    "most things continue as they are — and move away from them only as far as the evidence "
+    "justifies. Every forecast must be resolvable: a neutral judge must be able to say YES or NO "
+    "when the window closes. Output strictly JSON. " + DATA_RULE
 )
+
+
+def _lang_rule() -> str:
+    if CONFIG.output_lang == "ko":
+        return ("Write every human-readable string value (statement, reasoning, location, "
+                "resolution_criteria, narrative, note, evidence) in Korean (한국어). Keep JSON keys in English.\n")
+    return ""
 
 _HORIZON_LABEL = {"24h": "the next 24 hours", "week": "the next week",
                   "month": "the next month", "year": "the next year"}
@@ -46,6 +60,20 @@ class Oracle:
         self.base = CONFIG.llm_base_url.rstrip("/")
         self.key = CONFIG.llm_api_key
         self.model = CONFIG.llm_model
+        # Independent judge — another model (ideally another family, optionally another
+        # server) so forecasts aren't graded by the model that made them.
+        self.judge_base = (CONFIG.judge_base_url or CONFIG.llm_base_url).rstrip("/")
+        # never send the oracle's key to a different judge host
+        self.judge_key = CONFIG.judge_api_key or (CONFIG.llm_api_key if self.judge_base == self.base else "")
+        self.judge_model = CONFIG.judge_model or ""
+
+    @property
+    def judge_model_name(self) -> str:
+        return self.judge_model or self.model
+
+    @property
+    def judge_independent(self) -> bool:
+        return bool(self.judge_model) and self.judge_model != self.model
 
     async def health(self) -> bool:
         try:
@@ -72,7 +100,7 @@ class Oracle:
         horizons = ", ".join(f'"{h}"' for h in CONFIG.horizons)
         spans = "; ".join(f"{h} = {_HORIZON_LABEL.get(h, h)}" for h in CONFIG.horizons)
         return (
-            f"=== LIVE WORLD SNAPSHOT ({brief.event_count} signals) ===\n{brief.text}\n\n"
+            f"=== LIVE WORLD SNAPSHOT ({brief.event_count} signals) ===\n{wrap(brief.text)}\n\n"
             f"Note: any [MARKET-ODDS] signals are real-money crowd probabilities from Polymarket — "
             f"treat them as strong anchors; you may sharpen or disagree with them, but stay calibrated.\n"
             f"Any [FUTURES] signals are forward-looking prices: a curve in backwardation means the market "
@@ -83,7 +111,12 @@ class Oracle:
             f'{{"statement": "<specific predicted event>", "horizon": <one of {horizons}>, '
             f'"probability": <integer 0-100>, "reasoning": "<one sentence grounded in the snapshot>", '
             f'"location": "<the place this is about, e.g. Strait of Hormuz>", '
-            f'"lat": <approx latitude or null>, "lng": <approx longitude or null>}}\n'
+            f'"lat": <approx latitude or null>, "lng": <approx longitude or null>, '
+            f'"resolution_criteria": "<the observable fact that makes this YES, with a threshold '
+            f'and source, e.g. USGS reports an M6.0+ quake within 300 km of Tokyo>"}}\n'
+            f"Prefer measurable statements (magnitudes, prices, official declarations, counts). "
+            f"Avoid vague verbs like 'tensions rise'.\n"
+            f"{_lang_rule()}"
             f"JSON array only — no markdown, no commentary."
         )
 
@@ -96,20 +129,34 @@ class Oracle:
         return preds
 
     async def _chat(self, user: str) -> str:
-        return await self._complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], 1400)
+        return await self._complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+                                    1400, purpose="forecast")
 
-    async def _complete(self, messages: list[dict], max_tokens: int = 900, model: str | None = None) -> str:
-        body = {"model": model or self.model, "messages": messages, "temperature": CONFIG.temperature, "max_tokens": max_tokens}
-        async with httpx.AsyncClient(verify=HTTPX_VERIFY, timeout=CONFIG.request_timeout) as c:
-            r = await c.post(f"{self.base}/chat/completions", json=body,
-                             headers={"Authorization": f"Bearer {self.key}"})
-            r.raise_for_status()
-            msg = r.json()["choices"][0]["message"]
-            # Reasoning models (gemma4, qwen3, …) put their answer in `content` but
-            # stream chain-of-thought into a separate `reasoning` field. If the token
-            # budget was spent on CoT, `content` comes back empty — fall back to
-            # `reasoning` so JSON extraction still has something to parse.
-            return (msg.get("content") or "").strip() or (msg.get("reasoning") or "")
+    async def _complete(self, messages: list[dict], max_tokens: int = 900, model: str | None = None,
+                        purpose: str = "general", base: str | None = None, key: str | None = None,
+                        temperature: float | None = None) -> str:
+        obs.BUDGET.check_and_count()          # raises BudgetExceeded past the daily cap
+        body = {"model": model or self.model, "messages": messages,
+                "temperature": CONFIG.temperature if temperature is None else temperature,
+                "max_tokens": max_tokens}
+        t0 = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(verify=HTTPX_VERIFY, timeout=CONFIG.request_timeout) as c:
+                r = await c.post(f"{(base or self.base)}/chat/completions", json=body,
+                                 headers={"Authorization": f"Bearer {key or self.key}"})
+                r.raise_for_status()
+                msg = r.json()["choices"][0]["message"]
+        except Exception:
+            obs.inc("pythia_llm_calls_total", purpose=purpose, outcome="error")
+            raise
+        finally:
+            obs.observe("pythia_llm_latency_seconds", time.perf_counter() - t0)
+        obs.inc("pythia_llm_calls_total", purpose=purpose, outcome="ok")
+        # Reasoning models (gemma4, qwen3, …) put their answer in `content` but
+        # stream chain-of-thought into a separate `reasoning` field. If the token
+        # budget was spent on CoT, `content` comes back empty — fall back to
+        # `reasoning` so JSON extraction still has something to parse.
+        return (msg.get("content") or "").strip() or (msg.get("reasoning") or "")
 
     async def chat(self, question: str, brief, predictions, history=None,
                    persona: tuple[str, str] | None = None, model: str | None = None) -> str:
@@ -118,7 +165,7 @@ class Oracle:
         oracle itself, answered by that persona's own model when `model` is set."""
         parts = []
         if brief:
-            parts.append(f"=== LIVE WORLD DATA — {brief.event_count} signals across {len(brief.domains)} domains ===\n{brief.text}")
+            parts.append(f"=== LIVE WORLD DATA — {brief.event_count} signals across {len(brief.domains)} domains ===\n{wrap(brief.text)}")
         if predictions:
             parts.append("=== YOUR CURRENT PREDICTIONS ===\n" + "\n".join(
                 f"- [{p.horizon}] {int(p.probability * 100)}% {p.statement}" + (f" — {p.reasoning}" if p.reasoning else "")
@@ -135,36 +182,48 @@ class Oracle:
                    "weather/disasters, seismic, cyber, infrastructure, and Polymarket crowd odds). Answer the "
                    "user's question using the live data below and sound reasoning. Be specific and concise, cite "
                    "concrete signals, and give probabilities when it helps. If the data doesn't cover something, say so.")
+        sys += " " + DATA_RULE + (" Answer in Korean (한국어)." if CONFIG.output_lang == "ko" else "")
         messages: list[dict] = [{"role": "system", "content": sys}]
         for h in (history or [])[-6:]:
             role = "assistant" if h.get("role") == "assistant" else "user"
             messages.append({"role": role, "content": str(h.get("content", ""))[:2000]})
         messages.append({"role": "user", "content": f"{context}\n\n— USER QUESTION —\n{question}"})
-        return await self._complete(messages, 800, model=model)
+        return await self._complete(messages, 800, model=model, purpose="chat")
 
     async def judge(self, forecast: dict, evidence: list[str], current_brief: str) -> tuple[str, str]:
         """Grade one expired forecast against what actually happened.
-        Returns (verdict yes|no|unclear, one-sentence evidence)."""
+        Returns (verdict yes|no|unclear, one-sentence evidence).
+
+        The judge never sees the forecast's probability (so it can't anchor on it),
+        checks the resolution criteria fixed at forecast time, and — when JUDGE_MODEL is
+        set — runs on a different model than the one that made the forecast."""
         import time as _t
         made = _t.strftime("%Y-%m-%d", _t.gmtime(forecast["ts"] / 1000))
         due = _t.strftime("%Y-%m-%d", _t.gmtime(forecast["resolve_after"] / 1000))
-        lines = "\n".join(f"- {t}" for t in evidence) or "(no archived signals for this window)"
+        lines = "\n".join(f"- [E{i}] {t}" for i, t in enumerate(evidence)) or "(no archived signals for this window)"
+        criteria = forecast.get("resolution_criteria") or "(none recorded — judge the statement literally)"
         prompt = (
             f'FORECAST (made {made}, horizon "{forecast["horizon"]}", window closed {due}):\n'
             f'"{forecast["statement"]}"'
-            + (f' — location: {forecast["location"]}' if forecast.get("location") else "") + "\n\n"
-            f"WORLD SIGNALS ARCHIVED DURING THE WINDOW:\n{lines}\n\n"
-            f"CURRENT WORLD SNAPSHOT (aftermath evidence):\n{current_brief[:2500]}\n\n"
-            "Did the forecast come true within its window? Judge strictly from the evidence above.\n"
+            + (f' — location: {forecast["location"]}' if forecast.get("location") else "") + "\n"
+            f"RESOLUTION CRITERIA (fixed when the forecast was made): {criteria}\n\n"
+            f"WORLD SIGNALS ARCHIVED DURING THE WINDOW:\n{wrap(lines)}\n\n"
+            f"CURRENT WORLD SNAPSHOT (aftermath evidence):\n{wrap(current_brief[:2500])}\n\n"
+            "Did the forecast come true within its window? Judge strictly from the evidence above "
+            "against the resolution criteria.\n"
             'Return ONLY JSON: {"verdict": "yes" | "no" | "unclear", '
-            '"evidence": "<one sentence citing the deciding signal>"}\n'
+            '"evidence": "<one sentence citing the deciding signal by its [E#] id>"}\n'
             '"yes" only if the evidence clearly shows it happened; "no" if the window closed and the '
             "evidence shows it did not (or an event that big would surely appear above and does not); "
-            '"unclear" only if the evidence genuinely cannot decide.'
+            '"unclear" when the evidence genuinely cannot decide — prefer "unclear" over guessing.\n'
+            + _lang_rule()
         )
-        sys = "You are a strict, impartial resolution judge for a forecasting system. Output strictly JSON."
+        sys = ("You are a strict, impartial resolution judge for a forecasting system. You did not make "
+               "these forecasts and have no stake in them. Output strictly JSON. " + DATA_RULE)
         text = await self._complete([{"role": "system", "content": sys},
-                                     {"role": "user", "content": prompt}], CONFIG.judge_max_tokens)
+                                     {"role": "user", "content": prompt}], CONFIG.judge_max_tokens,
+                                    model=self.judge_model or None, purpose="judge",
+                                    base=self.judge_base, key=self.judge_key, temperature=0.0)
         for chunk in self._extract_objects(text):
             try:
                 d = json.loads(chunk)
@@ -235,6 +294,7 @@ class Oracle:
             location=str(it.get("location", "")).strip()[:80],
             lat=lat, lng=lng,
             brief_id=brief_id,
+            resolution_criteria=str(it.get("resolution_criteria", "")).strip()[:300],
         )
 
     @classmethod
@@ -259,7 +319,7 @@ class Oracle:
         optionally hand the predictions to the swarm for deliberation."""
         base = (brief.text if brief else "(no live world data loaded)")[:4000]
         prompt = (
-            f"=== LIVE WORLD SNAPSHOT ===\n{base}\n\n"
+            f"=== LIVE WORLD SNAPSHOT ===\n{wrap(base)}\n\n"
             f"=== HYPOTHETICAL EVENT (assume it just happened) ===\n{scenario.strip()[:400]}\n\n"
             "Reason through the knock-on consequences, grounded in the real snapshot above.\n"
             "Return ONLY JSON:\n"
@@ -267,10 +327,11 @@ class Oracle:
             '{"statement": "<concrete knock-on event>", "horizon": "24h"|"week"|"month", '
             '"probability": <integer 0-100, conditional on the hypothetical>, '
             '"reasoning": "<one sentence>", "location": "<place>", "lat": <or null>, "lng": <or null>}'
-            ", ... 4 to 6 predictions]}\nJSON only — no markdown, no commentary."
+            ", ... 4 to 6 predictions]}\n" + _lang_rule() + "JSON only — no markdown, no commentary."
         )
         text = await self._complete([{"role": "system", "content": SYSTEM},
-                                     {"role": "user", "content": prompt}], CONFIG.whatif_max_tokens)
+                                     {"role": "user", "content": prompt}], CONFIG.whatif_max_tokens,
+                                    purpose="whatif")
         narrative, preds = "", []
         for chunk in self._extract_objects(text):
             try:

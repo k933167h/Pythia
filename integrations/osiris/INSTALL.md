@@ -183,3 +183,17 @@ working install). Osiris itself is upstream — clone it separately, then apply 
 
 All UI talks to the engine only through `/api/engine/*`, which forwards to
 `PYTHIA_ENGINE_URL` (default `http://localhost:8088`).
+
+## v0.3: engine token and proxy modes
+
+Set these in Osiris' `.env.local` (server-side only — never `NEXT_PUBLIC_*`):
+
+| Variable | Purpose |
+|---|---|
+| `PYTHIA_ENGINE_TOKEN` | Token the proxy sends to the engine (admin for a personal dashboard; read for a shared one) |
+| `PYTHIA_PROXY_READ_ONLY=true` | Shared/LAN dashboards: refuse every state-changing call except chat and what-if |
+| `PYTHIA_PROXY_ALLOW_ADMIN=true` | Let the browser reach webhook registration, human review and the audit trail (off by default) |
+
+Copy the updated `routes/engine-proxy-route.ts` — it also adds the `DELETE` handler the
+watchlist and alert-rule delete buttons need.
+

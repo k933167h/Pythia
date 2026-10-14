@@ -10,3 +10,7 @@ Screen Recording.mov
 *.mov
 runs/*.json
 runs/briefs/
+# runtime output — never commit logs, ledgers, audit trails or webhook secrets
+runs/*.log
+runs/*.md
+.pytest_cache/

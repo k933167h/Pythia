@@ -19,7 +19,10 @@ import BriefPanel from './BriefPanel';
 import RadarStrip from './RadarStrip';
 
 type Agent = { name: string; probability: number; note?: string };
-type Prediction = { id: string; statement: string; horizon: string; probability: number; reasoning: string; location?: string; lat?: number | null; lng?: number | null; agents?: Agent[]; base_probability?: number | null; prev_probability?: number | null; split?: boolean; ts?: number };
+type Prediction = { id: string; statement: string; horizon: string; probability: number; reasoning: string; location?: string; lat?: number | null; lng?: number | null; agents?: Agent[]; base_probability?: number | null; prev_probability?: number | null; split?: boolean; ts?: number;
+  // v0.3 quality & governance fields
+  raw_probability?: number | null; market_anchor?: { source: string; probability: number; title: string } | null;
+  low_evidence?: boolean; evidence_count?: number; calibrated?: boolean; resolution_criteria?: string; ai_generated?: boolean };
 type World = { event_count: number; domains: Record<string, number>; top_events: string[] };
 type Run = { stage: string; trigger: string; error?: string; elapsed_ms?: number };
 type Snap = {
@@ -269,6 +272,23 @@ export default function PythiaPanel({ mobile = false, embedded = false, onLocate
                     <div className="h-full rounded-full transition-[width] duration-700 ease-out" style={{ width: `${Math.round(p.probability * 100)}%`, background: h.color }} />
                   </div>
                   {p.reasoning && <div className="text-[11px] text-[var(--text-secondary)] mt-1.5 leading-relaxed">{p.reasoning}</div>}
+                  {(p.market_anchor || p.low_evidence || p.calibrated || p.resolution_criteria) && (
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1.5 text-[10px]">
+                      {p.market_anchor && (
+                        <span title={`blended with ${p.market_anchor.source}: ${p.market_anchor.title}`}
+                          className="px-1.5 py-0.5 rounded border border-[var(--border-secondary)] text-[var(--text-muted)]">
+                          {p.market_anchor.source} {Math.round(p.market_anchor.probability * 100)}%
+                          {p.raw_probability != null ? ` · council ${Math.round(p.raw_probability * 100)}%` : ''}
+                        </span>
+                      )}
+                      {p.calibrated && <span title="recalibrated on PYTHIA's own resolved track record"
+                        className="px-1.5 py-0.5 rounded border border-[var(--border-secondary)] text-[var(--text-muted)]">calibrated</span>}
+                      {p.low_evidence && <span title={`only ${p.evidence_count ?? 0} related live signal(s) — treat with caution`}
+                        className="px-1.5 py-0.5 rounded" style={{ color: 'var(--alert-red)', border: '1px solid var(--alert-red)' }}>low evidence</span>}
+                      {p.resolution_criteria && <span title={`Resolves YES if: ${p.resolution_criteria}`}
+                        className="px-1.5 py-0.5 rounded border border-[var(--border-secondary)] text-[var(--text-muted)] cursor-help">criteria</span>}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between mt-1.5 gap-2">
                     {p.location
                       ? <button onClick={(e) => { e.stopPropagation(); if (p.lat != null && p.lng != null) onLocate?.(p.lat, p.lng); }}
@@ -292,6 +312,10 @@ export default function PythiaPanel({ mobile = false, embedded = false, onLocate
             </div>
           );
         })}
+      </div>
+
+      <div className="text-[10px] text-[var(--text-muted)] mt-3 leading-relaxed" role="note">
+        AI-generated forecasts (생성형 AI 자동 생성) — probabilities are uncertain and are not facts or advice.
       </div>
 
       <DeliberationModal prediction={selected} onClose={() => setSelected(null)} onLocate={onLocate} />

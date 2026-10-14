@@ -8,8 +8,10 @@ Append-only JSONL in runs/ledger.jsonl — no database, no cloud.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -81,25 +83,143 @@ class Ledger:
                 "agents": [{"name": a.name, "probability": a.probability, "model": a.model}
                            for a in p.agents],
                 "brief_id": brief.id if brief else None,
+                # v0.3 quality & governance fields
+                "resolution_criteria": p.resolution_criteria,
+                "raw_probability": p.raw_probability,
+                "precal_probability": p.precal_probability,
+                "market_probability": (p.market_anchor or {}).get("probability"),
+                "market_source": (p.market_anchor or {}).get("source"),
+                "evidence_count": p.evidence_count,
+                "low_evidence": p.low_evidence,
+                "provenance": p.provenance,
             }
             self.forecasts[p.id] = rec
             self._append(rec)
 
-    def maybe_record_brief(self, brief: WorldBrief, min_gap_ms: int = 3_300_000) -> None:
+    def maybe_record_brief(self, brief: WorldBrief, min_gap_ms: int = 3_300_000,
+                           events: Optional[list] = None) -> None:
         """Archive the brief's top signals, at most ~hourly — the judge's evidence base.
-        500 hourly snapshots ≈ 3 weeks of world memory."""
+        500 hourly snapshots ≈ 3 weeks of world memory.
+
+        v0.3: also keeps compact *measurable* events (quake magnitudes + coords) so some
+        forecasts can be resolved deterministically, and chains each record to the
+        previous one with SHA-256 so archived evidence can't be silently edited
+        (OWASP ASI06 memory poisoning)."""
         if self.briefs and brief.ts - self.briefs[-1]["ts"] < min_gap_ms:
             return
-        rec = {"kind": "brief", "ts": brief.ts, "top_events": brief.top_events[:20]}
+        from .resolver import parse_time
+        from .calibration import market_probability
+        measured = []
+        seismic_ok = False
+        for e in (events or []):
+            raw = e.raw or {}
+            if e.category == "seismic":
+                seismic_ok = True
+                mag = raw.get("magnitude") or raw.get("mag")
+                # the quake's own origin time — NOT the fetch time, or yesterday's quake still
+                # in the feed would "happen" inside every new forecast's window
+                origin = parse_time(raw.get("time") or raw.get("origin_time") or raw.get("timestamp")
+                                    or raw.get("tmEqk") or raw.get("date"))
+                if mag is not None and e.lat is not None and origin is not None:
+                    try:
+                        measured.append({"t": "quake", "mag": float(mag), "lat": e.lat, "lng": e.lng,
+                                         "title": e.title[:120], "origin": origin})
+                    except (TypeError, ValueError):
+                        pass
+            elif e.category == "market-odds":
+                mp = market_probability(e)
+                if mp is not None:
+                    measured.append({"t": "market", "prob": round(mp, 3), "title": e.title[:200],
+                                     "source": e.source,
+                                     "close": parse_time(raw.get("close") or raw.get("close_time")
+                                                         or raw.get("end_date") or raw.get("endDate")),
+                                     "closed": bool(raw.get("closed") or raw.get("resolved"))})
+        rec = {"kind": "brief", "ts": brief.ts, "top_events": brief.top_events[:20],
+               "measured": measured[:60], "seismic_ok": seismic_ok}
+        rec["prev"] = self.briefs[-1].get("hash", "") if self.briefs else ""
+        rec["hash"] = _chain_hash(rec)
         self.briefs.append(rec)
         self.briefs = self.briefs[-MAX_BRIEFS:]
         self._append(rec)
 
-    def resolve(self, fid: str, verdict: str, outcome: Optional[float], evidence: str) -> None:
+    def verify_archive(self) -> dict:
+        """Re-walk the hash chain of archived world snapshots."""
+        broken = []
+        prev = None
+        for i, b in enumerate(self.briefs):
+            if "hash" not in b:          # pre-v0.3 records carry no hash
+                prev = None
+                continue
+            if b["hash"] != _chain_hash(b) or (prev is not None and b.get("prev") != prev):
+                broken.append(i)
+            prev = b["hash"]
+        return {"records": len(self.briefs), "broken": broken, "ok": not broken}
+
+    def resolve(self, fid: str, verdict: str, outcome: Optional[float], evidence: str,
+                method: str = "llm", judge_model: str = "") -> None:
+        audit = (method == "llm" and outcome is not None
+                 and random.random() < max(0.0, min(1.0, CONFIG.audit_sample_rate)))
         rec = {"kind": "resolution", "id": fid, "verdict": verdict,
-               "outcome": outcome, "evidence": evidence[:400], "resolved_ms": now_ms()}
+               "outcome": outcome, "evidence": evidence[:400], "resolved_ms": now_ms(),
+               "method": method, "judge_model": judge_model, "audit": audit}
         self.resolutions[fid] = rec
         self._append(rec)
+
+    def override(self, fid: str, verdict: str, note: str, reviewer: str = "human") -> dict:
+        """Human-in-the-loop correction of a resolution (ISO 42001 / NIST MANAGE oversight)."""
+        if fid not in self.forecasts:
+            raise KeyError(fid)
+        outcome = {"yes": 1.0, "no": 0.0}.get(verdict)
+        if verdict not in ("yes", "no", "unclear"):
+            raise ValueError("verdict must be yes|no|unclear")
+        prev = self.resolutions.get(fid, {})
+        rec = {"kind": "resolution", "id": fid, "verdict": verdict, "outcome": outcome,
+               "evidence": f"[human review by {reviewer}] {note}"[:400], "resolved_ms": now_ms(),
+               "method": "human", "judge_model": reviewer, "audit": False,
+               "overrides": prev.get("verdict")}
+        self.resolutions[fid] = rec
+        self._append(rec)
+        return rec
+
+    def audit_queue(self, limit: int = 50) -> list[dict]:
+        """LLM-judged resolutions sampled for human review that nobody has reviewed yet."""
+        out = []
+        for fid, r in self.resolutions.items():
+            if r.get("audit") and r.get("method") == "llm":
+                f = self.forecasts.get(fid, {})
+                out.append({"id": fid, "statement": f.get("statement"), "horizon": f.get("horizon"),
+                            "probability": f.get("probability"),
+                            "resolution_criteria": f.get("resolution_criteria", ""),
+                            "verdict": r["verdict"], "evidence": r.get("evidence", ""),
+                            "judge_model": r.get("judge_model", ""), "resolved_ms": r["resolved_ms"]})
+        out.sort(key=lambda x: x["resolved_ms"], reverse=True)
+        return out[:limit]
+
+    def calibration_pairs(self) -> dict[str, list[tuple[float, float]]]:
+        """(pre-calibration probability, outcome) per horizon — what Platt is fitted on."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        for fid, f in self.forecasts.items():
+            r = self.resolutions.get(fid)
+            if not r or r.get("outcome") is None:
+                continue
+            p = f.get("precal_probability")
+            if p is None:
+                p = f["probability"]
+            out.setdefault(f["horizon"], []).append((float(p), float(r["outcome"])))
+        return out
+
+    def measured_in_window(self, start_ms: int, end_ms: int) -> list[dict]:
+        """Measured records from snapshots taken during (or shortly after) the window.
+        Callers must still filter on each record's own event time."""
+        seen, out = set(), []
+        for b in self.briefs:
+            if start_ms <= b["ts"] <= end_ms + 6 * 3_600_000:
+                for m in b.get("measured", []):
+                    key = (m.get("title"), m.get("mag"))
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(m)
+        return out
 
     def history_for(self, statement: str, horizon: str, cap: int = 20) -> list[dict]:
         """Probability drift: this forecast's probability across past passes.
@@ -212,7 +332,31 @@ class Ledger:
              for f, r in resolved),
             key=lambda x: x["resolved_ms"], reverse=True)[:12]
 
+        from . import calibration as cal
+        pairs = [(f["probability"], r["outcome"]) for f, r in resolved]
+        quality = {"final": cal.score_set(pairs)}
+        raw_pairs = [(f["raw_probability"], r["outcome"]) for f, r in resolved
+                     if f.get("raw_probability") is not None]
+        if raw_pairs:
+            quality["council_raw"] = cal.score_set(raw_pairs)
+        mk = [(f, r) for f, r in resolved if f.get("market_probability") is not None]
+        if mk:
+            quality["vs_market"] = cal.score_set([(f["probability"], r["outcome"]) for f, r in mk],
+                                                 baseline=[f["market_probability"] for f, _ in mk])
+        quality["per_horizon"] = {h: cal.score_set([(f["probability"], r["outcome"])
+                                                    for f, r in resolved if f["horizon"] == h])
+                                  for h in HORIZON_MS if any(f["horizon"] == h for f, _ in resolved)}
+        methods: dict[str, int] = {}
+        for r in self.resolutions.values():
+            m = r.get("method", "llm" if r.get("outcome") is not None else "void")
+            methods[m] = methods.get(m, 0) + 1
+        low_ev = [(f["probability"], r["outcome"]) for f, r in resolved if f.get("low_evidence")]
+
         return {
+            "quality": quality,
+            "resolution_methods": methods,
+            "audit_pending": len(self.audit_queue(limit=10_000)),
+            "low_evidence": cal.score_set(low_ev) if low_ev else {"n": 0},
             "resolved": len(resolved),
             "open": len(self.forecasts) - len(self.resolutions),
             "due": len(self.due()),
@@ -225,3 +369,8 @@ class Ledger:
             "models": model_scores,
             "recent": recent,
         }
+
+
+def _chain_hash(rec: dict) -> str:
+    body = {k: v for k, v in rec.items() if k != "hash"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()

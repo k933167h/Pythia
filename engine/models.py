@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _id(prefix: str) -> str:
@@ -29,6 +29,13 @@ class WorldEvent(BaseModel):
     salience: float = 0.5
     ts: int = Field(default_factory=now_ms)
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("url", "summary", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        # several feeds omit optional strings (e.g. a Kalshi market with no url); a None
+        # used to fail validation and silently drop the *entire* feed for that pass
+        return "" if v is None else v
 
 
 class WorldBrief(BaseModel):
@@ -66,6 +73,16 @@ class Prediction(BaseModel):
     split: bool = False                 # True when the swarm disagrees sharply
     brief_id: Optional[str] = None
     ts: int = Field(default_factory=now_ms)
+    # ── quality & governance (v0.3) ──
+    resolution_criteria: str = ""       # how a judge decides YES/NO, fixed at forecast time
+    raw_probability: Optional[float] = None   # council consensus before market blend + calibration
+    precal_probability: Optional[float] = None  # after market blend, before Platt (what calibration is fitted on)
+    market_anchor: Optional[dict] = None      # {source, probability, title, similarity} when matched
+    calibrated: bool = False            # Platt recalibration applied
+    evidence_count: int = 0             # live signals related to this forecast
+    low_evidence: bool = False          # fewer related signals than MIN_EVIDENCE
+    ai_generated: bool = True           # AI 기본법 §31 / EU AI Act Art.50 labelling
+    provenance: dict[str, Any] = Field(default_factory=dict)  # model, prompt_version, engine_version, input hash
 
 
 class RunRecord(BaseModel):

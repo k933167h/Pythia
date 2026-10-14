@@ -14,6 +14,7 @@ import time
 import httpx
 
 from .config import CONFIG, HTTPX_VERIFY
+from .sanitize import DATA_RULE, wrap
 from .models import now_ms
 from .state import STATE
 
@@ -115,7 +116,7 @@ async def generate(trigger: str = "scheduled") -> dict:
     brier = score.get("brier")
 
     prompt = (
-        f"=== LIVE WORLD SNAPSHOT ===\n{world[:4200]}\n\n"
+        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(world[:4200])}\n\n"
         f"=== CURRENT FORECASTS ===\n{pred_lines}\n\n"
         f"=== FORECASTS RESOLVING IN THE NEXT 24H ===\n{due_lines}\n\n"
         + (f"=== WATCHLIST MOVES ===\n{moves}\n\n" if moves else "")
@@ -128,13 +129,19 @@ async def generate(trigger: str = "scheduled") -> dict:
         "MARKETS — one tight paragraph: watchlist moves + what your forecasts imply for them.\n"
         "WATCH FOR — 2-3 specific things that would change the picture if they happen.\n"
         "Plain text with those section headers. Concrete, calibrated, no filler, no preamble."
+        + ("\nWrite the whole brief in Korean (한국어); keep the four section headers as given." if CONFIG.output_lang == "ko" else "")
     )
-    sys = "You are PYTHIA, a forecasting oracle writing its subscriber's daily brief. Be concrete and calibrated."
+    sys = ("You are PYTHIA, a forecasting oracle writing its subscriber's daily brief. Be concrete and calibrated. "
+           + DATA_RULE)
     text = await oracle._complete([{"role": "system", "content": sys},
-                                   {"role": "user", "content": prompt}], CONFIG.brief_max_tokens)
+                                   {"role": "user", "content": prompt}], CONFIG.brief_max_tokens,
+                                  purpose="brief")
     text = (text or "").strip()
     if not text:
         raise RuntimeError("the model returned an empty brief")
+    # AI-generated label travels with the text itself (AI 기본법 §31, EU AI Act Art. 50)
+    from .quality import disclosure
+    text = f"{text}\n\n— {disclosure()['notice']}"
 
     _DIR.mkdir(exist_ok=True)
     (_DIR / f"{date}.md").write_text(text)

@@ -72,7 +72,7 @@ async def refresh_world() -> int:
         STATE.events = events
         brief = build_brief(events)
         STATE.set_world(brief)
-        ledger.maybe_record_brief(brief)   # ~hourly world archive for the judge
+        ledger.maybe_record_brief(brief, events=events)   # ~hourly world archive for the judge
         from . import webhooks
         webhooks.fire_events(events)       # push fresh high-salience events to subscribers
         return len(events)
@@ -118,6 +118,10 @@ async def run_prediction(trigger: str = "manual") -> RunRecord:
                 except Exception as e:  # noqa: BLE001 — never let the swarm sink a run
                     log.warning("swarm deliberation skipped: %s", e)
 
+            # quality: market anchoring, recalibration, evidence gate, provenance + AI label
+            from .quality import finalize
+            preds = finalize(preds, events, brief, oracle.model)
+
             _carry_momentum(STATE.predictions, preds)
             STATE.set_predictions(preds)
             run.prediction_ids = [p.id for p in preds]
@@ -126,17 +130,33 @@ async def run_prediction(trigger: str = "manual") -> RunRecord:
             from .runtime import ledger
             if CONFIG.track_enabled:
                 ledger.record_forecasts(preds, brief)
-                ledger.maybe_record_brief(brief)
+                ledger.maybe_record_brief(brief, events=events)
 
             from . import webhooks
             webhooks.fire_forecasts(preds)
             webhooks.fire_events(events)
 
             await stage("done", f"{len(preds)} predictions")
+            import hashlib
+            import json as _json
+            from . import observability as obs
+            from .audit import AUDIT
+            from .config import PROMPT_VERSION
+            from .quality import input_hash
+            obs.inc("pythia_passes_total", outcome="ok", trigger=trigger)
+            AUDIT.record("forecast_pass", actor=trigger, run_id=run.id, model=oracle.model,
+                         prompt_version=PROMPT_VERSION, input_hash=input_hash(brief),
+                         output_hash=hashlib.sha256(_json.dumps(
+                             [(p.statement, p.horizon, p.probability) for p in preds]).encode()).hexdigest()[:16],
+                         n_events=len(events), n_predictions=len(preds),
+                         low_evidence=sum(1 for p in preds if p.low_evidence),
+                         market_anchored=sum(1 for p in preds if p.market_anchor))
         except Exception as e:  # noqa: BLE001
             run.error = str(e)
             await stage("error", str(e))
             log.exception("oracle pass failed")
+            from . import observability as obs
+            obs.inc("pythia_passes_total", outcome="error", trigger=trigger)
         finally:
             STATE.set_generating(False)
     return run

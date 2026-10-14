@@ -53,8 +53,10 @@ class OracleLoop:
 
 
 async def resolve_due(max_judged: int | None = None) -> int:
-    """Grade expired forecasts: LLM-judge the due ones (bounded per pass so the
-    local model isn't hogged), void the ones long past their grace window."""
+    """Grade expired forecasts. Measured data first (deterministic resolver), then the
+    independent judge for the rest — bounded per pass so the local model isn't hogged.
+    Forecasts long past their grace window are voided."""
+    from . import resolver
     from .runtime import ledger, oracle
     if max_judged is None:
         max_judged = CONFIG.resolve_max_per_pass
@@ -63,24 +65,32 @@ async def resolve_due(max_judged: int | None = None) -> int:
         return 0
     judged = 0
     for f in due:
+        det = resolver.resolve(f, ledger)
+        if det:
+            verdict, note = det
+            ledger.resolve(f["id"], verdict, 1.0 if verdict == "yes" else 0.0, note,
+                           method="deterministic", judge_model="measured-data")
+            log.info("resolved %s -> %s deterministically (%s)", f["id"], verdict, f["statement"][:60])
+            continue
         if ledger.past_grace(f):
-            ledger.resolve(f["id"], "unresolved", None, "window passed with insufficient evidence")
+            ledger.resolve(f["id"], "unresolved", None, "window passed with insufficient evidence",
+                           method="void")
             continue
         if judged >= max_judged:
-            break
+            continue      # keep scanning: later forecasts may still resolve deterministically
         evidence = ledger.window_events(f["ts"], f["resolve_after"])
         current = STATE.world.text if STATE.world else ""
         try:
             verdict, note = await oracle.judge(f, evidence, current)
         except Exception as e:  # noqa: BLE001 — a dead model shouldn't spin the loop
             log.warning("judge failed for %s: %s", f["id"], e)
-            break
+            judged = max_judged
+            continue
         judged += 1
         log.info("resolved %s -> %s (%s)", f["id"], verdict, f["statement"][:60])
-        if verdict == "yes":
-            ledger.resolve(f["id"], "yes", 1.0, note)
-        elif verdict == "no":
-            ledger.resolve(f["id"], "no", 0.0, note)
+        if verdict in ("yes", "no"):
+            ledger.resolve(f["id"], verdict, 1.0 if verdict == "yes" else 0.0, note,
+                           method="llm", judge_model=oracle.judge_model_name)
         # "unclear" stays open — retried next pass until its grace window expires
     STATE.publish("scorecard", ledger.scorecard())
     return judged

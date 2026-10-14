@@ -11,4 +11,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: python scripts/check_baseline.py
+      - run: python scripts/check_dependencies.py
       - run: bash -n run-all.sh

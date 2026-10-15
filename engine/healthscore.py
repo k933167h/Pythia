@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import time
-from pathlib import Path
 
+from .config import CONFIG
+from .fsutil import atomic_write_json
 from .state import STATE
 
 log = logging.getLogger("pythia.healthscore")
 
-_STORE = Path("runs/health_score.json")
+_STORE = CONFIG.runs_dir / "health_score.json"   # was cwd-relative
 
 # Six pillars → the event categories that feed each, and each pillar's weight in the
 # global blend (weights sum to 1.0). Categories come from engine/osiris_intake.py.
@@ -86,7 +87,7 @@ def compute() -> dict:
     STATE.health_score = out
     try:
         _STORE.parent.mkdir(exist_ok=True)
-        _STORE.write_text(json.dumps(out, indent=2))
+        atomic_write_json(_STORE, out, indent=2)
     except OSError as e:  # noqa: BLE001
         log.debug("health score save failed: %s", e)
     log.info("global health score: %d (%s) from %d events", glob, out["band"], len(events))

@@ -49,7 +49,7 @@ PYTHIA does. It is an **oracle**: a single surface that takes in the entire live
 - **Honest grading:** measurable forecasts (quakes, settled markets) resolve deterministically; the rest go to an **independent judge model** that never sees the probability; a sample goes to a human review queue. The scorecard reports Brier, log loss, ECE and **skill vs the market**.
 - **Secure by default:** loopback-only until you set read/admin tokens; CORS allow-list; prompt-injection fencing of feed text; SSRF-pinned, HMAC-signed webhooks; rate limits and an LLM budget. See [SECURITY.md](SECURITY.md).
 - **Governance:** hash-chained audit trail, `/governance/system-card` mapping controls to NIST AI RMF, ISO/IEC 42001, OWASP LLM/Agentic Top 10 and Korea's AI Framework Act; AI-generated labels on every output.
-- **Ops:** `/metrics` (Prometheus), `/healthz`, `/readyz`, 78 tests + CI. Korean output with `ORACLE_LANG=ko`.
+- **Ops:** `/metrics` (Prometheus), `/healthz`, `/readyz`, tests + CI. Korean output with `ORACLE_LANG=ko`.
 
 Details and the research behind each change: [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md).
 

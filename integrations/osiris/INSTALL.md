@@ -191,9 +191,14 @@ Set these in Osiris' `.env.local` (server-side only — never `NEXT_PUBLIC_*`):
 | Variable | Purpose |
 |---|---|
 | `PYTHIA_ENGINE_TOKEN` | Token the proxy sends to the engine (admin for a personal dashboard; read for a shared one) |
-| `PYTHIA_PROXY_READ_ONLY=true` | Shared/LAN dashboards: refuse every state-changing call except chat and what-if |
-| `PYTHIA_PROXY_ALLOW_ADMIN=true` | Let the browser reach webhook registration, human review and the audit trail (off by default) |
+| `PYTHIA_PROXY_MODE` | `read` (default): reads + chat/what-if · `operator`: + predict, loop, model, watchlist, alert rules, brief schedule · `admin`: + webhooks, human review, audit trail |
+| `PYTHIA_PROXY_TRUST_XFF=true` | Only behind a reverse proxy you control: forward its right-most `X-Forwarded-For` hop so engine rate limits and audit are per person |
+| `PYTHIA_PROXY_TIMEOUT_MS` | Deadline for non-streaming engine calls (default 240000) |
+
+Copy `lib/proxyPolicy.ts` to `src/lib/proxyPolicy.ts` — the route imports it. Its tests run with
+`node --experimental-strip-types --test integrations/osiris/tests/*.test.ts` (Node ≥ 22.6).
 
 Copy the updated `routes/engine-proxy-route.ts` — it also adds the `DELETE` handler the
-watchlist and alert-rule delete buttons need.
+watchlist and alert-rule delete buttons need. `run-all.sh` sets `PYTHIA_PROXY_MODE=operator` when
+the UI is bound to 127.0.0.1 (default) and `read` with `PYTHIA_LAN=1`.
 

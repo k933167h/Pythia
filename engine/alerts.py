@@ -23,6 +23,7 @@ import uuid
 
 import httpx
 
+from .fsutil import atomic_write_json
 from .config import CONFIG, HTTPX_VERIFY
 from .models import now_ms
 from .state import STATE
@@ -57,14 +58,14 @@ _last_fired: dict[str, int] = {}        # rule id -> ts of last fire (cooldowns)
 
 def _save_rules() -> None:
     try:
-        _RULES_PATH.write_text(json.dumps(RULES, indent=1))
+        atomic_write_json(_RULES_PATH, RULES)
     except OSError as e:
         log.warning("alert rules save failed: %s", e)
 
 
 def _save_feed() -> None:
     try:
-        _FEED_PATH.write_text(json.dumps(FEED[-_FEED_MAX:], indent=1))
+        atomic_write_json(_FEED_PATH, FEED[-_FEED_MAX:])
     except OSError:
         pass
 

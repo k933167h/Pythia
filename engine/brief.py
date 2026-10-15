@@ -13,7 +13,9 @@ import time
 
 import httpx
 
+from .fsutil import atomic_write_json, atomic_write_text
 from .config import CONFIG, HTTPX_VERIFY
+from .world_state import compact
 from .sanitize import DATA_RULE, wrap
 from .models import now_ms
 from .state import STATE
@@ -44,7 +46,7 @@ def set_config(time_hhmm: str | None = None, enabled: bool | None = None) -> dic
     if enabled is not None:
         cfg["enabled"] = bool(enabled)
     try:
-        _CFG_PATH.write_text(json.dumps(cfg, indent=1))
+        atomic_write_json(_CFG_PATH, cfg)
     except OSError:
         pass
     return cfg
@@ -116,7 +118,7 @@ async def generate(trigger: str = "scheduled") -> dict:
     brier = score.get("brier")
 
     prompt = (
-        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(world[:4200])}\n\n"
+        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(compact(world, 4200))}\n\n"
         f"=== CURRENT FORECASTS ===\n{pred_lines}\n\n"
         f"=== FORECASTS RESOLVING IN THE NEXT 24H ===\n{due_lines}\n\n"
         + (f"=== WATCHLIST MOVES ===\n{moves}\n\n" if moves else "")
@@ -144,7 +146,7 @@ async def generate(trigger: str = "scheduled") -> dict:
     text = f"{text}\n\n— {disclosure()['notice']}"
 
     _DIR.mkdir(exist_ok=True)
-    (_DIR / f"{date}.md").write_text(text)
+    atomic_write_text(_DIR / f"{date}.md", text)
     STATE.publish("brief", {"date": date, "text": text})
     from . import alerts, webhooks
     alerts.push_external("brief", f"Morning Brief — {date}",

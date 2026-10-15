@@ -5,7 +5,7 @@ import json
 import pytest
 
 from engine import runtime
-from engine.config import CONFIG
+from engine.config import CONFIG, ENGINE_VERSION
 from engine.models import WorldEvent, now_ms
 from engine.state import STATE
 
@@ -87,7 +87,7 @@ def test_full_pass(fake):
     assert "untrusted" in system
     # ledger + audit trail
     rec = runtime.ledger.forecasts[fed.id]
-    assert rec["market_probability"] == pytest.approx(0.9) and rec["provenance"]["engine_version"] == "0.3.0"
+    assert rec["market_probability"] == pytest.approx(0.9) and rec["provenance"]["engine_version"] == ENGINE_VERSION
     from engine import audit
     assert audit.AUDIT.tail(1)[0]["action"] == "forecast_pass"
     assert runtime.ledger.briefs[-1]["measured"]                    # quake + market measured

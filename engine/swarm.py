@@ -14,6 +14,7 @@ import logging
 from . import calibration as cal
 from .config import CONFIG
 from .models import AgentView, Prediction, WorldBrief
+from .world_state import compact
 from .sanitize import DATA_RULE, wrap
 from .state import STATE
 
@@ -67,7 +68,7 @@ def _persona_messages(name: str, lens: str, brief_text: str, preds: list[Predict
         + (" Write each note in Korean (한국어)." if CONFIG.output_lang == "ko" else "")
     )
     user = (
-        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(brief_text[:2600])}\n\n"
+        f"=== LIVE WORLD SNAPSHOT ===\n{wrap(compact(brief_text, 2600))}\n\n"
         f"=== CANDIDATE PREDICTIONS ===\n{listing}\n\n"
         f"Score every prediction from your lens. JSON array only."
     )
@@ -104,7 +105,7 @@ async def _ask(oracle, name: str, lens: str, brief_text: str,
     # (unparseable) reply — so if a pass yields zero votes, retry once compacted.
     for brief_cap in (2600, 1100):
         try:
-            text = await oracle._complete(_persona_messages(name, lens, brief_text[:brief_cap], preds),
+            text = await oracle._complete(_persona_messages(name, lens, compact(brief_text, brief_cap), preds),
                                           max_tokens=CONFIG.swarm_max_tokens, model=persona_model,
                                           purpose="swarm")
         except Exception as e:  # noqa: BLE001 — a transient local-model hiccup shouldn't drop the voice

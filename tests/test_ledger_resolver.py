@@ -4,7 +4,7 @@ import pytest
 
 from engine import resolver
 from engine.audit import AuditLog
-from engine.ledger import HORIZON_MS, Ledger
+from engine.ledger import Ledger
 from engine.models import Prediction, WorldBrief, WorldEvent, now_ms
 
 
@@ -217,3 +217,71 @@ def test_korea_parsers():
     assert len(a) == 1 and "41" in a[0].title and "나쁨" in a[0].title
     assert k.parse_air({"response": {"body": {"items": ""}}}, "부산") == []
     assert not k.in_korea(35.7, 139.7)
+
+
+# ── question-level dedup (revisions) ───────────────────────────────────────────────
+
+def test_restated_forecast_becomes_revision(tmp_path):
+    led = Ledger(path=tmp_path / "l.jsonl")
+    a = _pred("Israel will strike Iranian nuclear facilities within the week", 0.30, horizon="week",
+              raw_probability=0.3, precal_probability=0.3)
+    led.record_forecasts([a], None)
+    b = _pred("Israel strikes Iran's nuclear facilities this week", 0.50, horizon="week",
+              raw_probability=0.5, precal_probability=0.5)
+    c = _pred("The Fed cuts interest rates in November", 0.6, horizon="week")
+    led.record_forecasts([b, c], None)
+    assert b.id == a.id                           # took over the open question's id
+    assert c.id != a.id and len(led.forecasts) == 2
+    f = led.forecasts[a.id]
+    assert f["n_revisions"] == 2 and f["last_probability"] == 0.5
+    assert f["probability"] == pytest.approx(0.4)             # time-averaged for scoring
+    assert led.calibration_pairs() == {}                       # nothing resolved yet
+    assert [x["p"] for x in led.revisions_for(a.id)] == [0.3, 0.5]
+    # replay from disk gives the same state
+    led2 = Ledger(path=tmp_path / "l.jsonl")
+    assert led2.forecasts[a.id]["probability"] == pytest.approx(0.4)
+    assert led2.forecasts[a.id]["n_revisions"] == 2
+
+
+def test_revision_rules(tmp_path):
+    led = Ledger(path=tmp_path / "l.jsonl")
+    a = _pred("A magnitude 6 earthquake strikes near Tokyo", 0.2, horizon="week")
+    led.record_forecasts([a], None)
+    # opposite polarity is a different question
+    neg = _pred("No magnitude 6 earthquake strikes near Tokyo", 0.8, horizon="week")
+    # other horizon is a different question
+    other_h = _pred("A magnitude 6 earthquake strikes near Tokyo", 0.1, horizon="24h")
+    led.record_forecasts([neg, other_h], None)
+    assert len({a.id, neg.id, other_h.id}) == 3
+    # two restatements in one pass: only one may claim the open question
+    r1 = _pred("Magnitude 6 earthquake strikes near Tokyo", 0.25, horizon="week")
+    r2 = _pred("A magnitude 6 earthquake strikes near Tokyo this week", 0.3, horizon="week")
+    led.record_forecasts([r1, r2], None)
+    assert r1.id == a.id and r2.id != a.id
+    # outside the revision window → a new question
+    led.forecasts[a.id]["ts"] -= 3 * 86_400_000
+    late = _pred("A magnitude 6 earthquake strikes near Tokyo", 0.2, horizon="week")
+    led.record_forecasts([late], None)
+    assert late.id != a.id
+
+
+def test_scorecard_cached_until_change(tmp_path):
+    led = Ledger(path=tmp_path / "l.jsonl")
+    p = _pred("Something measurable happens", 0.7)
+    led.record_forecasts([p], None)
+    s1 = led.scorecard()
+    assert led.scorecard() is s1                               # cached
+    led.resolve(p.id, "yes", 1.0, "", method="deterministic")
+    s2 = led.scorecard()
+    assert s2 is not s1 and s2["resolved"] == 1
+
+
+def test_append_after_torn_line(tmp_path):
+    path = tmp_path / "l.jsonl"
+    led = Ledger(path=path)
+    led.record_forecasts([_pred("first", 0.5)], None)
+    with path.open("a") as f:
+        f.write('{"kind": "forecast", "id": "torn')          # crash mid-write
+    led.record_forecasts([_pred("second entirely different topic", 0.5)], None)
+    led2 = Ledger(path=path)
+    assert {f["statement"] for f in led2.forecasts.values()} == {"first", "second entirely different topic"}

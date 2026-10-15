@@ -34,6 +34,7 @@ import uuid
 import httpx
 
 from . import observability as obs
+from .fsutil import atomic_write_json
 from .netguard import UnsafeURL, check_url, pinned
 
 from .config import CONFIG, HTTPX_VERIFY
@@ -60,8 +61,7 @@ HOOKS: list[dict] = load()
 
 def _save() -> None:
     try:
-        _PATH.write_text(json.dumps(HOOKS, indent=1))
-        _PATH.chmod(0o600)                 # holds signing secrets
+        atomic_write_json(_PATH, HOOKS, mode=0o600)   # holds signing secrets
     except OSError as e:
         log.warning("webhooks save failed: %s", e)
 

@@ -189,7 +189,7 @@ class Config:
         }
 
 
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.3.1"
 # Bump whenever a prompt changes, so every ledger record says which prompt made it.
 PROMPT_VERSION = "2026-10-ax1"
 

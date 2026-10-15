@@ -1,6 +1,6 @@
 [project]
 name = "pythia"
-version = "0.3.0"
+version = "0.3.1"
 description = "A local, keyless world-watching prediction oracle — fuses Osiris live global feeds and a local agent swarm (MiroFish-style) with a local LLM to forecast what happens next, and exposes the whole world-view as an agent API."
 requires-python = ">=3.11"
 license = "MIT"

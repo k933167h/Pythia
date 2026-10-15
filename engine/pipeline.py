@@ -34,7 +34,8 @@ def hydrate_from_ledger() -> int:
         per_horizon[f["horizon"]] = n + 1
         preds.append(Prediction(
             id=f["id"], statement=f["statement"], horizon=f["horizon"],
-            probability=f["probability"], base_probability=f.get("base_probability"),
+            probability=f.get("last_probability", f["probability"]),
+            base_probability=f.get("base_probability"),
             reasoning=f.get("reasoning") or "", location=f.get("location") or "",
             lat=f.get("lat"), lng=f.get("lng"), split=bool(f.get("split")),
             agents=[AgentView(**a) for a in f.get("agents", [])],
@@ -122,15 +123,16 @@ async def run_prediction(trigger: str = "manual") -> RunRecord:
             from .quality import finalize
             preds = finalize(preds, events, brief, oracle.model)
 
-            _carry_momentum(STATE.predictions, preds)
-            STATE.set_predictions(preds)
-            run.prediction_ids = [p.id for p in preds]
-
-            # ledger: every forecast goes on the record the moment it's made
+            # ledger first: a forecast restating an open question becomes a revision of it
+            # and takes that question's id, so the deck, drift and webhooks see one question
             from .runtime import ledger
             if CONFIG.track_enabled:
                 ledger.record_forecasts(preds, brief)
                 ledger.maybe_record_brief(brief, events=events)
+
+            _carry_momentum(STATE.predictions, preds)
+            STATE.set_predictions(preds)
+            run.prediction_ids = [p.id for p in preds]
 
             from . import webhooks
             webhooks.fire_forecasts(preds)

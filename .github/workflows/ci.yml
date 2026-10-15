@@ -3,15 +3,24 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  test:
+  engine:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install fastapi "uvicorn[standard]" httpx python-dotenv pydantic mcp pytest
-      - run: pytest
+      # --locked fails the build if uv.lock is stale, so CI tests what users install
+      - run: uv sync --locked --extra dev
+      - run: uv run pytest
+  proxy-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --experimental-strip-types --test integrations/osiris/tests/*.test.ts

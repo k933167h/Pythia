@@ -135,7 +135,8 @@
 # 팀 공유: 토큰 + 독립 판정자 + 국문
 export PYTHIA_ADMIN_TOKEN=$(openssl rand -hex 32) PYTHIA_READ_TOKEN=$(openssl rand -hex 32)
 export JUDGE_MODEL=gemma3:12b ORACLE_LANG=ko LLM_DAILY_BUDGET=2000
-# Osiris(.env.local): PYTHIA_ENGINE_TOKEN=<관리 토큰>, 공용 화면이면 PYTHIA_PROXY_READ_ONLY=true
+# Osiris(.env.local): PYTHIA_ENGINE_TOKEN=<관리 토큰>, PYTHIA_PROXY_MODE=read|operator|admin (기본 read)
+# 개인 PC: ./run-all.sh (UI는 127.0.0.1, operator) · 휴대폰/LAN 공유: PYTHIA_LAN=1 ./run-all.sh (read)
 # MCP: PYTHIA_ENGINE_TOKEN=<읽기 토큰>
 ```
 

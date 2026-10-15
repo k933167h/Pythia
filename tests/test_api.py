@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from engine.config import CONFIG
+from engine.config import CONFIG, ENGINE_VERSION
 from engine.server import app
 
 
@@ -99,7 +99,7 @@ def test_webhook_registration_ssrf_and_secret():
 def test_governance_endpoints():
     c = client()
     card = c.get("/governance/system-card").json()
-    assert card["version"]["engine"] == "0.3.0"
+    assert card["version"]["engine"] == ENGINE_VERSION
     assert any("제31조" in s for ctl in card["controls"] for s in ctl["evidences"])
     v = c.get("/governance/audit/verify").json()
     assert v["audit_log"]["ok"] and v["world_archive"]["ok"]

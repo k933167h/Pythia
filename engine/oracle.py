@@ -17,6 +17,7 @@ import httpx
 from . import observability as obs
 from .config import CONFIG, HTTPX_VERIFY
 from .models import Prediction, WorldBrief
+from .world_state import compact
 from .sanitize import DATA_RULE, wrap
 
 log = logging.getLogger("pythia.oracle")
@@ -208,7 +209,7 @@ class Oracle:
             + (f' — location: {forecast["location"]}' if forecast.get("location") else "") + "\n"
             f"RESOLUTION CRITERIA (fixed when the forecast was made): {criteria}\n\n"
             f"WORLD SIGNALS ARCHIVED DURING THE WINDOW:\n{wrap(lines)}\n\n"
-            f"CURRENT WORLD SNAPSHOT (aftermath evidence):\n{wrap(current_brief[:2500])}\n\n"
+            f"CURRENT WORLD SNAPSHOT (aftermath evidence):\n{wrap(compact(current_brief, 2500))}\n\n"
             "Did the forecast come true within its window? Judge strictly from the evidence above "
             "against the resolution criteria.\n"
             'Return ONLY JSON: {"verdict": "yes" | "no" | "unclear", '
@@ -317,7 +318,7 @@ class Oracle:
         forecast the knock-on effects. Ephemeral — nothing is stored or ledgered.
         Returns (cleaned scenario, narrative, knock-on Predictions) so the caller can
         optionally hand the predictions to the swarm for deliberation."""
-        base = (brief.text if brief else "(no live world data loaded)")[:4000]
+        base = compact(brief.text, 4000) if brief else "(no live world data loaded)"
         prompt = (
             f"=== LIVE WORLD SNAPSHOT ===\n{wrap(base)}\n\n"
             f"=== HYPOTHETICAL EVENT (assume it just happened) ===\n{scenario.strip()[:400]}\n\n"

@@ -27,6 +27,15 @@ HORIZON_MS = {
     "year": 365 * 86_400_000,
 }
 GRACE = 2.0                    # keep trying to judge until due + GRACE × horizon, then void
+# A fresh forecast that restates an open one (same horizon, same polarity, similar text)
+# issued within this share of the horizon is a *revision* of it, not a new question —
+# otherwise a 15-minute loop records ~1,150 near-duplicates a day and every score,
+# calibration fit and persona weight counts one question dozens of times.
+REVISION_WINDOW = 0.25
+REVISION_JACCARD = 0.5
+REVISION_RATIO = 0.72
+# probability fields averaged across revisions (time-averaged scoring, as Metaculus does)
+_AVG_FIELDS = ("probability", "raw_probability", "precal_probability", "market_probability")
 MAX_BRIEFS = 500               # compact world archive kept in memory
 CAL_BINS = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
 
@@ -37,6 +46,8 @@ class Ledger:
         self.forecasts: dict[str, dict] = {}     # id -> forecast record
         self.resolutions: dict[str, dict] = {}   # id -> resolution record
         self.briefs: list[dict] = []             # {ts, top_events} — the world archive
+        self._version = 0                        # bumped on every change (scorecard cache)
+        self._score_cache: tuple[int, int, dict] | None = None
         self._load()
 
     # ── persistence ──
@@ -51,7 +62,10 @@ class Ledger:
                 continue
             kind = rec.get("kind")
             if kind == "forecast" and rec.get("id"):
+                rec.setdefault("revisions", [_rev_entry(rec)])
                 self.forecasts[rec["id"]] = rec
+            elif kind == "revision" and rec.get("id") in self.forecasts:
+                _apply_revision(self.forecasts[rec["id"]], rec)
             elif kind == "resolution" and rec.get("id"):
                 self.resolutions[rec["id"]] = rec
             elif kind == "brief":
@@ -62,17 +76,68 @@ class Ledger:
                  n, len(self.forecasts), len(self.resolutions))
 
     def _append(self, rec: dict) -> None:
+        self._version += 1
         try:
-            with self.path.open("a") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with self.path.open("ab+") as f:
+                # a crash mid-write can leave a partial last line; start on a fresh line so
+                # this record isn't glued onto (and lost with) the broken one
+                f.seek(0, 2)
+                if f.tell() > 0:
+                    f.seek(-1, 2)
+                    if f.read(1) != b"\n":
+                        f.write(b"\n")
+                f.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
         except OSError as e:  # a full disk shouldn't sink a forecast pass
             log.warning("ledger write failed: %s", e)
 
     # ── recording ──
+    def find_open_match(self, p: Prediction, now: int, taken: set[str]) -> Optional[str]:
+        """The open forecast this prediction restates, if any (see REVISION_WINDOW)."""
+        import difflib
+        from .calibration import content_tokens, negated
+        window = REVISION_WINDOW * HORIZON_MS.get(p.horizon, HORIZON_MS["week"])
+        neg = negated(p.statement)
+        toks = content_tokens(p.statement)
+        target = p.statement.lower()
+        best, best_score = None, 0.0
+        for fid, f in self.forecasts.items():
+            if (fid in taken or fid in self.resolutions or f["horizon"] != p.horizon
+                    or now - f["ts"] > window or f["resolve_after"] <= now
+                    or negated(f["statement"]) != neg):
+                continue
+            ft = content_tokens(f["statement"])
+            jac = len(toks & ft) / len(toks | ft) if toks and ft else 0.0
+            ratio = difflib.SequenceMatcher(None, f["statement"].lower(), target).ratio() if jac < REVISION_JACCARD else 0.0
+            score = max(jac, ratio if ratio >= REVISION_RATIO else 0.0)
+            if (jac >= REVISION_JACCARD or ratio >= REVISION_RATIO) and score > best_score:
+                best, best_score = fid, score
+        return best
+
     def record_forecasts(self, preds: list[Prediction], brief: Optional[WorldBrief]) -> None:
+        """Persist a pass's forecasts. A forecast restating an open question becomes a
+        revision of it and takes over that question's id (so the deck, drift and
+        webhooks follow one question); anything else is a new question."""
+        now = now_ms()
+        taken: set[str] = set()
         for p in preds:
             if p.id in self.forecasts:
+                taken.add(p.id)
                 continue
+            fid = self.find_open_match(p, now, taken)
+            if fid:
+                rev = {"kind": "revision", "id": fid, "ts": p.ts, "statement": p.statement,
+                       "probability": p.probability, "raw_probability": p.raw_probability,
+                       "precal_probability": p.precal_probability,
+                       "market_probability": (p.market_anchor or {}).get("probability"),
+                       "agents": [{"name": a.name, "probability": a.probability, "model": a.model}
+                                  for a in p.agents],
+                       "provenance": p.provenance}
+                _apply_revision(self.forecasts[fid], rev)
+                self._append(rev)
+                p.id = fid
+                taken.add(fid)
+                continue
+            taken.add(p.id)
             rec = {
                 "kind": "forecast", "id": p.id, "statement": p.statement,
                 "horizon": p.horizon, "probability": p.probability,
@@ -93,8 +158,9 @@ class Ledger:
                 "low_evidence": p.low_evidence,
                 "provenance": p.provenance,
             }
+            rec["revisions"] = [_rev_entry(rec)]
             self.forecasts[p.id] = rec
-            self._append(rec)
+            self._append({k: v for k, v in rec.items() if k != "revisions"})
 
     def maybe_record_brief(self, brief: WorldBrief, min_gap_ms: int = 3_300_000,
                            events: Optional[list] = None) -> None:
@@ -221,6 +287,13 @@ class Ledger:
                         out.append(m)
         return out
 
+    def revisions_for(self, fid: str, cap: int = 40) -> list[dict]:
+        """Probability drift of one question: its revisions, oldest first ({ts, p})."""
+        f = self.forecasts.get(fid)
+        if not f:
+            return []
+        return [{"ts": r["ts"], "p": r["p"]} for r in f.get("revisions", [])][-cap:]
+
     def history_for(self, statement: str, horizon: str, cap: int = 20) -> list[dict]:
         """Probability drift: this forecast's probability across past passes.
         Statements are re-drafted each pass, so match by similarity (same horizon,
@@ -273,6 +346,16 @@ class Ledger:
 
     # ── the scorecard ──
     def scorecard(self) -> dict:
+        """Track record. Cached until the ledger changes — it is read by /metrics, every
+        swarm pass (persona weights) and the brief, and costs ~1 s on a large ledger."""
+        key = (self._version, len(self.forecasts) + len(self.resolutions))
+        if self._score_cache and self._score_cache[:2] == key:
+            return self._score_cache[2]
+        out = self._compute_scorecard()
+        self._score_cache = (key[0], key[1], out)
+        return out
+
+    def _compute_scorecard(self) -> dict:
         resolved = [(f, self.resolutions[fid]) for fid, f in self.forecasts.items()
                     if fid in self.resolutions and self.resolutions[fid].get("outcome") is not None]
         briers = [(f["probability"] - r["outcome"]) ** 2 for f, r in resolved]
@@ -374,3 +457,32 @@ class Ledger:
 def _chain_hash(rec: dict) -> str:
     body = {k: v for k, v in rec.items() if k != "hash"}
     return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _rev_entry(rec: dict) -> dict:
+    e = {"ts": rec.get("ts"), "p": rec.get("probability")}
+    for k in _AVG_FIELDS[1:]:
+        if rec.get(k) is not None:
+            e[k] = rec[k]
+    return e
+
+
+def _apply_revision(rec: dict, rev: dict) -> None:
+    """Fold one revision into its forecast record: keep the full revision trail, score
+    on the time-averaged probabilities, show the latest wording/agents."""
+    revs = rec.setdefault("revisions", [_rev_entry(rec)])
+    entry = {"ts": rev.get("ts"), "p": rev.get("probability")}
+    for k in _AVG_FIELDS[1:]:
+        if rev.get(k) is not None:
+            entry[k] = rev[k]
+    revs.append(entry)
+    for field, src in (("probability", "p"),) + tuple((k, k) for k in _AVG_FIELDS[1:]):
+        vals = [r[src] for r in revs if r.get(src) is not None]
+        if vals:
+            rec[field] = round(sum(vals) / len(vals), 4)
+    rec["last_probability"] = rev.get("probability")
+    rec["n_revisions"] = len(revs)
+    if rev.get("agents"):
+        rec["agents"] = rev["agents"]
+    if rev.get("statement"):
+        rec["last_statement"] = rev["statement"]

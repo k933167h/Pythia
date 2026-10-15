@@ -15,7 +15,9 @@ post webhooks and serve agents. The controls below are on by default.
 | Forged or replayed webhook deliveries | Standard Webhooks signing (`webhook-id/-timestamp/-signature`, HMAC-SHA256), secrets shown once, file mode 0600 | `engine/webhooks.py` |
 | Tampering with evidence or history | SHA-256 hash chains on the audit trail and the archived world snapshots | `engine/audit.py`, `engine/ledger.py` |
 | Over-privileged agents (LLM06, ASI03) | MCP bridge uses a read token; state-changing MCP tools off unless `PYTHIA_MCP_ALLOW_ACTIONS=true` | `engine/mcp.py` |
-| Admin actions from a shared dashboard | Proxy injects the token server-side, blocks webhook/review/audit routes, optional `PYTHIA_PROXY_READ_ONLY`, forwards the end user for per-person limits and audit | `integrations/osiris/routes/engine-proxy-route.ts` |
+| Anyone who can open a shared dashboard driving the engine | Proxy injects the token server-side and allow-lists calls by `PYTHIA_PROXY_MODE` — `read` by default (reads + chat/what-if), `operator`, `admin`; `run-all.sh` binds the UI to loopback unless `PYTHIA_LAN=1` | `integrations/osiris/lib/proxyPolicy.ts`, `routes/engine-proxy-route.ts`, `run-all.sh` |
+| Forged identity in rate limits / audit | `X-Forwarded-For` forwarded only with `PYTHIA_PROXY_TRUST_XFF=true`, right-most hop only; the engine trusts it only from loopback | `lib/proxyPolicy.ts`, `engine/security.py` |
+| Corrupted state on crash | Atomic temp-file + fsync + rename for every JSON state file; ledger appends recover from a torn last line | `engine/fsutil.py`, `engine/ledger.py` |
 | Judge key leaking to another host | Oracle key is reused for the judge only when the judge runs on the same base URL | `engine/oracle.py` |
 
 ## Exposing the engine

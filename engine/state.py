@@ -6,6 +6,7 @@ import json
 from collections import OrderedDict
 from typing import Any, Optional
 
+from .fsutil import atomic_write_json
 from .config import CONFIG
 from .models import Prediction, RunRecord, WorldBrief, now_ms
 
@@ -46,7 +47,7 @@ class EngineState:
 
     def save_swarm_models(self) -> None:
         try:
-            self._swarm_models_path().write_text(json.dumps(self.swarm_models, indent=1))
+            atomic_write_json(self._swarm_models_path(), self.swarm_models)
         except OSError:
             pass   # persistence is best-effort; the in-memory picks still apply
 
@@ -68,7 +69,7 @@ class EngineState:
 
     def save_watchlist(self) -> None:
         try:
-            self._watchlist_path().write_text(json.dumps(self.watchlist, indent=1))
+            atomic_write_json(self._watchlist_path(), self.watchlist)
         except OSError:
             pass
 

@@ -12,13 +12,13 @@ import re
 # (pattern, [symbols], theme) — first ~3 matching rules per forecast apply.
 # Symbols are Yahoo-style so the UI's keyless quote route can price everything.
 RULES: list[tuple[str, list[str], str]] = [
-    (r"strait|hormuz|suez|shipping|tanker|maritime|port|canal|red sea",
+    (r"strait|hormuz|suez|shipping|tanker|maritime|ports?\b|canal|red sea",
      ["BZ=F", "CL=F", "ZIM", "FRO"], "shipping & oil chokepoints"),
-    (r"oil|opec|crude|petrol|refiner",
+    (r"oil\b|opec|crude|petrol|refiner",
      ["CL=F", "BZ=F", "XLE"], "crude & energy"),
     (r"natural gas|pipeline|lng",
      ["NG=F", "XLE"], "natural gas"),
-    (r"war|conflict|strike[sd]?\b|missile|drone|invasion|offensive|military|troops|airstrike",
+    (r"wars?\b|conflict|strike[sd]?\b|missile|drone|invasion|offensive|military|troops|airstrike",
      ["ITA", "LMT", "RTX", "NOC"], "defense"),
     (r"nuclear|npp|radiation|reactor",
      ["CCJ", "URA", "ITA"], "nuclear & uranium"),
@@ -32,13 +32,13 @@ RULES: list[tuple[str, list[str], str]] = [
      ["CIBR", "CRWD", "PANW"], "cybersecurity"),
     (r"outbreak|virus|pandemic|epidemic|disease|h5n1|cholera|ebola",
      ["XPH", "PFE", "MRNA", "BNTX"], "pharma & response"),
-    (r"inflation|cpi|rate hike|federal reserve|interest rate|recession|bond",
+    (r"inflation|cpi\b|rate hike|federal reserve|interest rate|recession|bonds?\b",
      ["^TNX", "GC=F", "TLT"], "rates & safe havens"),
     (r"escalat|tension|geopolit|sanction|standoff|crisis|instability|unrest|coup|protest",
      ["GC=F", "^VIX", "DXY"], "risk-off"),
     (r"market (pullback|correction|volatil)|vix|equity|sell-?off|stocks",
      ["^VIX", "SPY", "QQQ"], "equity volatility"),
-    (r"taiwan|semiconductor|chip",
+    (r"taiwan|semiconductor|chips?\b|chipmakers?\b",
      ["SMH", "TSM", "NVDA"], "semiconductors"),
     (r"china|prc\b|beijing",
      ["FXI", "SMH", "DXY"], "china exposure"),
@@ -54,7 +54,9 @@ RULES: list[tuple[str, list[str], str]] = [
      ["JETS", "CL=F"], "aviation"),
 ]
 
-_COMPILED = [(re.compile(p, re.I), syms, theme) for p, syms, theme in RULES]
+# every alternative must start at a word boundary ("report" is not a port, "soil" is
+# not oil, "software"/"award" are not war); stems like "escalat" still match onward
+_COMPILED = [(re.compile(rf"\b(?:{p})", re.I), syms, theme) for p, syms, theme in RULES]
 
 
 def watch_from_predictions(predictions, cap: int = 14) -> list[dict]:

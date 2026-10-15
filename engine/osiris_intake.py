@@ -70,16 +70,38 @@ FEEDS = [
     ("/api/balloons", "balloons", "movement"),
 ]
 
-# Words that raise an event's salience (drives auto-scan selection).
-_HOT = {
-    "war": 1.0, "attack": 0.9, "strike": 0.8, "missile": 0.95, "killed": 0.85,
-    "coup": 0.95, "invasion": 1.0, "nuclear": 1.0, "explosion": 0.8, "protest": 0.6,
-    "riot": 0.7, "election": 0.7, "ceasefire": 0.85, "sanction": 0.7, "default": 0.7,
-    "collapse": 0.8, "resign": 0.7, "earthquake": 0.7, "outbreak": 0.8, "crisis": 0.75,
-    "hurricane": 0.9, "typhoon": 0.9, "cyclone": 0.9, "tornado": 0.8, "storm": 0.7,
-    "flood": 0.8, "volcano": 0.9, "eruption": 0.9, "tsunami": 1.0, "wildfire": 0.8,
-    "breach": 0.75, "ransomware": 0.8, "famine": 0.85, "drought": 0.7, "evacuat": 0.85,
-}
+# Words that raise an event's salience (drives auto-scan selection, the brief, the
+# health score and keyword alerts). Whole-word regexes — the v0.2 substring test made
+# "Flood WARning", "softWARe" and "Oscar AWARd" score like a war, and "COUPon" like a coup.
+_HOT_EN: list[tuple[str, float]] = [
+    (r"wars?|wartime", 1.0), (r"invasion|invad(?:e|es|ed|ing)", 1.0), (r"nuclear", 1.0),
+    (r"tsunamis?", 1.0), (r"missiles?", 0.95), (r"coups?|coup d'etat", 0.95),
+    (r"attack(?:s|ed|ing)?", 0.9), (r"hurricanes?|typhoons?|cyclones?", 0.9),
+    (r"volcano(?:es)?|volcanic|eruptions?|erupt(?:s|ed|ing)?", 0.9),
+    (r"killed|kills?|dead|deaths?", 0.85), (r"ceasefire|truce", 0.85),
+    (r"famine", 0.85), (r"evacuat\w*", 0.85),
+    (r"strikes?|airstrikes?", 0.8), (r"explosions?|blasts?", 0.8), (r"collapse[sd]?", 0.8),
+    (r"outbreaks?", 0.8), (r"tornado(?:es)?", 0.8), (r"floods?|flooding", 0.8),
+    (r"wildfires?", 0.8), (r"ransomware", 0.8),
+    (r"crisis|crises", 0.75), (r"breach(?:es|ed)?", 0.75),
+    (r"riots?|rioting", 0.7), (r"elections?", 0.7), (r"sanctions?|sanctioned", 0.7),
+    (r"debt default|sovereign default|default(?:s|ed)? on", 0.7), (r"resign(?:s|ed|ation)?", 0.7),
+    (r"earthquakes?|quakes?", 0.7), (r"storms?", 0.7), (r"droughts?", 0.7),
+    (r"protests?|protesters?", 0.6),
+]
+# Korean has no spaces between noun and particle (전쟁이, 미사일을), so these match as
+# substrings; each is specific enough not to fire inside unrelated words.
+_HOT_KO: list[tuple[str, float]] = [
+    ("전쟁", 1.0), ("침공", 1.0), ("핵실험", 1.0), ("핵무기", 1.0), ("지진해일", 1.0), ("쓰나미", 1.0),
+    ("미사일", 0.95), ("쿠데타", 0.95), ("계엄", 0.95),
+    ("공습", 0.9), ("포격", 0.9), ("태풍", 0.9), ("화산", 0.9), ("테러", 0.9),
+    ("사망", 0.85), ("휴전", 0.85), ("대피", 0.85), ("탄도", 0.85),
+    ("폭발", 0.8), ("붕괴", 0.8), ("홍수", 0.8), ("산불", 0.8), ("호우", 0.8), ("랜섬웨어", 0.8),
+    ("감염병", 0.8), ("확진", 0.75), ("위기", 0.75), ("해킹", 0.75), ("탄핵", 0.8),
+    ("폭동", 0.7), ("선거", 0.7), ("제재", 0.7), ("지진", 0.7), ("폭염", 0.7), ("가뭄", 0.7),
+    ("한파", 0.7), ("시위", 0.6), ("파업", 0.6),
+]
+_HOT_RX = [(re.compile(rf"\b(?:{p})\b", re.I), w) for p, w in _HOT_EN]
 
 
 def _find_items(data) -> list[dict]:
@@ -107,28 +129,48 @@ def _text(d: dict, *keys: str) -> str:
     return ""
 
 
+def _first(d: dict, *keys):
+    """First key whose value is not None — `or` chains dropped a legitimate 0.0
+    (every event on the equator or the Greenwich meridian lost its location)."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None and v != "":
+            return v
+    return None
+
+
 def _coord(d: dict):
-    lat = d.get("lat") or d.get("latitude")
-    lng = d.get("lng") or d.get("lon") or d.get("longitude")
-    coords = d.get("coords") or (d.get("geometry") or {}).get("coordinates")
+    lat = _first(d, "lat", "latitude")
+    lng = _first(d, "lng", "lon", "longitude")
+    coords = _first(d, "coords") or (d.get("geometry") or {}).get("coordinates")
     if (lat is None or lng is None) and isinstance(coords, (list, tuple)) and len(coords) >= 2:
         lng, lat = coords[0], coords[1]  # GeoJSON [lng, lat]
     try:
-        return (float(lat), float(lng)) if lat is not None and lng is not None else (None, None)
+        if lat is None or lng is None:
+            return (None, None)
+        lat, lng = float(lat), float(lng)
     except (TypeError, ValueError):
         return (None, None)
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return (None, None)
+    return (lat, lng)
 
 
 def _salience(title: str, summary: str, raw: dict) -> float:
-    text = f"{title} {summary}".lower()
+    text = f"{title} {summary}"
     score = 0.4
-    for word, weight in _HOT.items():
-        if word in text:
-            score = max(score, weight)
-    # honor an upstream risk score if Osiris provided one
-    rs = raw.get("risk_score") or raw.get("severity_score")
-    if isinstance(rs, (int, float)):
-        score = max(score, min(1.0, float(rs) / (100.0 if rs > 1 else 1.0)))
+    for rx, weight in _HOT_RX:
+        if weight > score and rx.search(text):
+            score = weight
+    for word, weight in _HOT_KO:
+        if weight > score and word in text:
+            score = weight
+    # honor an upstream risk score if Osiris provided one: ints are on a 0-100 scale,
+    # floats ≤ 1 are fractions; bools (True == 1) and junk are ignored
+    rs = _first(raw, "risk_score", "severity_score")
+    if isinstance(rs, (int, float)) and not isinstance(rs, bool) and rs >= 0:
+        frac = rs / 100.0 if (isinstance(rs, int) or rs > 1) else float(rs)
+        score = max(score, min(1.0, frac))
     return round(min(1.0, score), 2)
 
 

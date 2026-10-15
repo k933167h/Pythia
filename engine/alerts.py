@@ -133,6 +133,27 @@ def _terms(s: str) -> list[str]:
     return [t.strip().lower() for t in (s or "").split(",") if t.strip()]
 
 
+_TERM_RX: dict[str, "re.Pattern"] = {}
+
+
+def term_hit(term: str, text: str) -> bool:
+    """Does an alert keyword occur in `text` (already lower-cased)?
+    Latin-script terms match whole words — "war" no longer fires on "warning" or
+    "software" — with an optional trailing * for a prefix ("evacuat*"). Terms in other
+    scripts (Korean attaches particles: 지진이, 지진을) match as substrings."""
+    rx = _TERM_RX.get(term)
+    if rx is None:
+        if term.isascii():
+            prefix = term.endswith("*")
+            core = re.escape(term.rstrip("*"))
+            rx = re.compile(rf"\b{core}" + ("" if prefix else r"(?:s|es)?\b"))
+        else:
+            rx = re.compile(re.escape(term.rstrip("*")))
+        if len(_TERM_RX) < 2000:
+            _TERM_RX[term] = rx
+    return bool(rx.search(text))
+
+
 async def _quotes(symbols: list[str]) -> dict:
     """Price symbols through the UI's keyless quote route (60s-cached there)."""
     if not symbols:
@@ -187,7 +208,7 @@ async def evaluate() -> int:
                             continue
                         if e.salience < min_sal:
                             continue
-                        if terms and not any(t in text for t in terms):
+                        if terms and not any(term_hit(t, text) for t in terms):
                             continue
                     _seen_events.add(key)
                     _fire(rule, e.title, f"{getattr(e, 'category', '')} · {getattr(e, 'source', '')} · salience {e.salience:.2f}",
@@ -237,7 +258,7 @@ async def evaluate() -> int:
                         continue
                     if f.probability < bar or (hz and f.horizon != hz):
                         continue
-                    if terms and not any(t in f.statement.lower() for t in terms):
+                    if terms and not any(term_hit(t, f.statement.lower()) for t in terms):
                         continue
                     _seen_forecasts.add(f"{rule['id']}:{fid}")
                     _fire(rule, f"{int(f.probability * 100)}% [{f.horizon}] {f.statement}",

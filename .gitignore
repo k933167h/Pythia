@@ -14,3 +14,4 @@ runs/briefs/
 runs/*.log
 runs/*.md
 .pytest_cache/
+runs/*.pid

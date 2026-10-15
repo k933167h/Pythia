@@ -89,19 +89,20 @@ _HOT_EN: list[tuple[str, float]] = [
     (r"earthquakes?|quakes?", 0.7), (r"storms?", 0.7), (r"droughts?", 0.7),
     (r"protests?|protesters?", 0.6),
 ]
-# Korean has no spaces between noun and particle (전쟁이, 미사일을), so these match as
-# substrings; each is specific enough not to fire inside unrelated words.
+# Korean has no spaces between noun and particle (전쟁이, 미사일을), so these match inside
+# words; lookarounds exclude the common false hits (분위기 ⊃ 위기, 폭발적 인기 ⊃ 폭발).
 _HOT_KO: list[tuple[str, float]] = [
     ("전쟁", 1.0), ("침공", 1.0), ("핵실험", 1.0), ("핵무기", 1.0), ("지진해일", 1.0), ("쓰나미", 1.0),
     ("미사일", 0.95), ("쿠데타", 0.95), ("계엄", 0.95),
     ("공습", 0.9), ("포격", 0.9), ("태풍", 0.9), ("화산", 0.9), ("테러", 0.9),
     ("사망", 0.85), ("휴전", 0.85), ("대피", 0.85), ("탄도", 0.85),
-    ("폭발", 0.8), ("붕괴", 0.8), ("홍수", 0.8), ("산불", 0.8), ("호우", 0.8), ("랜섬웨어", 0.8),
-    ("감염병", 0.8), ("확진", 0.75), ("위기", 0.75), ("해킹", 0.75), ("탄핵", 0.8),
+    ("폭발(?!적)", 0.8), ("붕괴", 0.8), ("홍수", 0.8), ("산불", 0.8), ("호우", 0.8), ("랜섬웨어", 0.8),
+    ("감염병", 0.8), ("확진", 0.75), ("(?<![분])위기(?!감)", 0.75), ("해킹", 0.75), ("탄핵", 0.8),
     ("폭동", 0.7), ("선거", 0.7), ("제재", 0.7), ("지진", 0.7), ("폭염", 0.7), ("가뭄", 0.7),
     ("한파", 0.7), ("시위", 0.6), ("파업", 0.6),
 ]
 _HOT_RX = [(re.compile(rf"\b(?:{p})\b", re.I), w) for p, w in _HOT_EN]
+_HOT_KO_RX = [(re.compile(p), w) for p, w in _HOT_KO]
 
 
 def _find_items(data) -> list[dict]:
@@ -162,8 +163,8 @@ def _salience(title: str, summary: str, raw: dict) -> float:
     for rx, weight in _HOT_RX:
         if weight > score and rx.search(text):
             score = weight
-    for word, weight in _HOT_KO:
-        if weight > score and word in text:
+    for rx, weight in _HOT_KO_RX:
+        if weight > score and rx.search(text):
             score = weight
     # honor an upstream risk score if Osiris provided one: ints are on a 0-100 scale,
     # floats ≤ 1 are fractions; bools (True == 1) and junk are ignored

@@ -294,3 +294,80 @@ def score_set(pairs: Sequence[tuple[float, float]], baseline: Optional[Sequence[
         # >0 means systematically too eager to say YES (acquiescence bias, Schoenegger 2024)
         "yes_bias": round(mean_p - base_rate, 3),
     }
+
+
+# ── same-question test (ledger revision dedup) ───────────────────────────────────
+
+_NUM = re.compile(r"\d+(?:\.\d+)?")
+_CAPWORD = re.compile(r"\b[A-Z][A-Za-z\-]+")
+_LEAD_STOP = {"a", "an", "the", "no", "will", "there", "it", "this", "that", "by", "in", "on", "at",
+              "over", "after", "before", "within", "next", "some", "any", "at least"}
+# direction words: two statements on opposite sides of a pair ask different questions
+_DIRECTIONS = [
+    ({"cut", "cuts", "lower", "lowers", "lowered", "ease", "eases", "reduce", "reduces"},
+     {"raise", "raises", "raised", "hike", "hikes", "hiked", "increase", "increases", "tighten", "tightens"}),
+    ({"win", "wins", "won", "winning", "victory"}, {"lose", "loses", "lost", "losing", "defeat", "defeated"}),
+    ({"above", "over", "exceed", "exceeds", "higher", "top", "tops"},
+     {"below", "under", "beneath", "lower", "drops"}),
+    ({"rise", "rises", "rose", "climb", "climbs", "gain", "gains", "surge", "surges", "jump", "jumps", "up"},
+     {"fall", "falls", "fell", "drop", "drops", "decline", "declines", "slide", "slides", "plunge", "down"}),
+    ({"approve", "approves", "approved", "pass", "passes", "passed", "accept", "accepts"},
+     {"reject", "rejects", "rejected", "veto", "vetoes", "block", "blocks", "fail", "fails"}),
+    ({"enter", "enters", "join", "joins", "open", "opens", "reopen", "reopens", "resume", "resumes"},
+     {"exit", "exits", "leave", "leaves", "close", "closes", "shut", "shuts", "halt", "halts", "suspend"}),
+    ({"인하", "상승", "승리", "통과", "재개"}, {"인상", "하락", "패배", "부결", "중단"}),
+]
+
+
+def _numbers(text: str) -> set[float]:
+    return {float(n) for n in _NUM.findall(text or "")}
+
+
+def _side(words: set[str], text: str, pair) -> Optional[int]:
+    a = bool(words & pair[0]) or any(w in text for w in pair[0] if not w.isascii())
+    b = bool(words & pair[1]) or any(w in text for w in pair[1] if not w.isascii())
+    return 0 if a and not b else 1 if b and not a else None
+
+
+def _entity_seq(text: str, other: str) -> list[str]:
+    """Proper-noun-ish tokens in order, normalised to a 4-letter stem (Iran/Iranian/Iran's).
+    A capitalised word that the other statement uses in lower case (sentence-initial
+    "Magnitude" vs "a magnitude") is ordinary vocabulary, not an entity; a leading
+    stop-word ("The", "Will") never counts."""
+    other_lower_words = set(re.findall(r"[a-z][a-z\-]+", other or ""))   # words written lower-case there
+    out = []
+    for m in _CAPWORD.finditer(text or ""):
+        w = m.group(0)
+        lw = w.lower()
+        if lw in _LEAD_STOP:
+            continue
+        if lw in other_lower_words:
+            continue
+        out.append(lw[:4])
+    return out
+
+
+def same_question(a: str, b: str, min_jaccard: float = 0.5) -> bool:
+    """Conservative test that two forecast statements ask the same question. A missed
+    merge only costs a duplicate record; a false merge corrupts the track record — so
+    every guard must pass: same polarity, same numbers, no opposite direction words,
+    the same named entities in the same order, and enough shared content words."""
+    if negated(a) != negated(b):
+        return False
+    if _numbers(a) != _numbers(b):
+        return False
+    al, bl = (a or "").lower(), (b or "").lower()
+    aw, bw = set(re.findall(r"[a-z]+", al)), set(re.findall(r"[a-z]+", bl))
+    for pair in _DIRECTIONS:
+        sa, sb = _side(aw, al, pair), _side(bw, bl, pair)
+        if sa is not None and sb is not None and sa != sb:
+            return False
+        if (sa is None) != (sb is None) and (sa is not None or sb is not None):
+            # one states a direction the other doesn't mention — different claims
+            return False
+    if _entity_seq(a, b) != _entity_seq(b, a):
+        return False
+    ta, tb = content_tokens(a), content_tokens(b)
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= min_jaccard

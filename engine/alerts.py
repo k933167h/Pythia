@@ -147,7 +147,8 @@ def term_hit(term: str, text: str) -> bool:
         if term.isascii():
             prefix = term.endswith("*")
             core = re.escape(term.rstrip("*"))
-            rx = re.compile(rf"\b{core}" + ("" if prefix else r"(?:s|es)?\b"))
+            # lookarounds, not \b: \b never matches beside punctuation ("u.s.", "m7+", "$tsla")
+            rx = re.compile(rf"(?<!\w){core}" + ("" if prefix else r"(?:s|es)?(?!\w)"))
         else:
             rx = re.compile(re.escape(term.rstrip("*")))
         if len(_TERM_RX) < 2000:

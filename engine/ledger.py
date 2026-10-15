@@ -33,7 +33,6 @@ GRACE = 2.0                    # keep trying to judge until due + GRACE × horiz
 # calibration fit and persona weight counts one question dozens of times.
 REVISION_WINDOW = 0.25
 REVISION_JACCARD = 0.5
-REVISION_RATIO = 0.72
 # probability fields averaged across revisions (time-averaged scoring, as Metaculus does)
 _AVG_FIELDS = ("probability", "raw_probability", "precal_probability", "market_probability")
 MAX_BRIEFS = 500               # compact world archive kept in memory
@@ -92,25 +91,25 @@ class Ledger:
 
     # ── recording ──
     def find_open_match(self, p: Prediction, now: int, taken: set[str]) -> Optional[str]:
-        """The open forecast this prediction restates, if any (see REVISION_WINDOW)."""
-        import difflib
-        from .calibration import content_tokens, negated
+        """The open forecast this prediction restates, if any (see REVISION_WINDOW).
+        Matching is deliberately conservative (calibration.same_question): a missed merge
+        costs one duplicate; a false merge ("Fed cuts" folded into "Fed raises") would
+        corrupt the record permanently."""
+        from .calibration import content_tokens, same_question
         window = REVISION_WINDOW * HORIZON_MS.get(p.horizon, HORIZON_MS["week"])
-        neg = negated(p.statement)
         toks = content_tokens(p.statement)
-        target = p.statement.lower()
         best, best_score = None, 0.0
         for fid, f in self.forecasts.items():
             if (fid in taken or fid in self.resolutions or f["horizon"] != p.horizon
-                    or now - f["ts"] > window or f["resolve_after"] <= now
-                    or negated(f["statement"]) != neg):
+                    or now - f["ts"] > window or f["resolve_after"] <= now):
                 continue
-            ft = content_tokens(f["statement"])
-            jac = len(toks & ft) / len(toks | ft) if toks and ft else 0.0
-            ratio = difflib.SequenceMatcher(None, f["statement"].lower(), target).ratio() if jac < REVISION_JACCARD else 0.0
-            score = max(jac, ratio if ratio >= REVISION_RATIO else 0.0)
-            if (jac >= REVISION_JACCARD or ratio >= REVISION_RATIO) and score > best_score:
-                best, best_score = fid, score
+            # compare with both the question's first and latest wording
+            for stmt in {f["statement"], f.get("last_statement") or f["statement"]}:
+                if same_question(p.statement, stmt, REVISION_JACCARD):
+                    ft = content_tokens(stmt)
+                    score = len(toks & ft) / len(toks | ft) if toks and ft else 0.0
+                    if score > best_score:
+                        best, best_score = fid, score
         return best
 
     def record_forecasts(self, preds: list[Prediction], brief: Optional[WorldBrief]) -> None:
@@ -262,13 +261,20 @@ class Ledger:
         return out[:limit]
 
     def calibration_pairs(self) -> dict[str, list[tuple[float, float]]]:
-        """(pre-calibration probability, outcome) per horizon — what Platt is fitted on."""
+        """(pre-calibration probability, outcome) per horizon — what Platt is fitted on.
+        One pair per question, from its LATEST single-pass value: Platt is applied to one
+        pass's number, so it must be fitted on single-pass numbers — revision averages
+        are pulled toward the middle and would make the fit over-sharpen new forecasts."""
         out: dict[str, list[tuple[float, float]]] = {}
         for fid, f in self.forecasts.items():
             r = self.resolutions.get(fid)
             if not r or r.get("outcome") is None:
                 continue
-            p = f.get("precal_probability")
+            revs = f.get("revisions") or []
+            last = revs[-1] if revs else {}
+            p = last.get("precal_probability", last.get("p")) if last else None
+            if p is None:
+                p = f.get("precal_probability")
             if p is None:
                 p = f["probability"]
             out.setdefault(f["horizon"], []).append((float(p), float(r["outcome"])))

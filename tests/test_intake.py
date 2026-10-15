@@ -67,3 +67,20 @@ def test_alert_keywords_whole_words():
     assert term_hit("evacuat*", "residents evacuated")
     assert term_hit("지진", "경주에서 지진이 발생")
     assert term_hit("taiwan strait", "tension in the taiwan strait rises")
+
+
+def test_korean_false_positives_and_punctuated_alert_terms():
+    from engine.alerts import term_hit
+    assert _salience("회의 분위기 좋아", "", {}) == 0.4
+    assert _salience("폭발적인 인기", "", {}) == 0.4
+    assert _salience("금융 위기 우려", "", {}) == 0.75
+    assert term_hit("u.s.", "new u.s. sanctions")
+    assert term_hit("m7+", "an m7+ quake")
+    assert term_hit("$tsla", "$tsla jumps")
+    assert not term_hit("war", "warning")
+
+
+def test_compact_never_empty():
+    from engine.world_state import compact
+    text = "[SEISMIC] (1 signals)\n  • " + "M7 " * 200
+    assert compact(text, 300) != ""

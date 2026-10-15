@@ -285,3 +285,50 @@ def test_append_after_torn_line(tmp_path):
     led.record_forecasts([_pred("second entirely different topic", 0.5)], None)
     led2 = Ledger(path=path)
     assert {f["statement"] for f in led2.forecasts.values()} == {"first", "second entirely different topic"}
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Fed cuts rates in November", "Fed raises rates in November"),
+    ("Israel strikes Iran", "Iran strikes Israel"),
+    ("Israel strikes Iran", "Hamas strikes Iran"),
+    ("Russia launches a missile strike on Kyiv", "Ukraine launches a missile strike on Moscow"),
+    ("Oil above $90 by Friday", "Oil above $70 by Friday"),
+    ("M6+ earthquake hits Japan", "M6+ earthquake hits Chile"),
+    ("Trump wins the vote", "Trump loses the vote"),
+    ("Brent crude rises above $90", "Brent crude falls below $90"),
+    ("Fed cuts rates in November", "Fed holds rates in November"),
+])
+def test_different_questions_never_merge(tmp_path, a, b):
+    led = Ledger(path=tmp_path / "l.jsonl")
+    pa, pb = _pred(a, 0.8, horizon="week"), _pred(b, 0.1, horizon="week")
+    led.record_forecasts([pa], None)
+    led.record_forecasts([pb], None)
+    assert pa.id != pb.id and led.forecasts[pa.id]["probability"] == 0.8
+
+
+def test_calibration_uses_latest_single_pass_value(tmp_path):
+    led = Ledger(path=tmp_path / "l.jsonl")
+    a = _pred("Magnitude 6 earthquake strikes near Tokyo", 0.2, horizon="week", precal_probability=0.2)
+    led.record_forecasts([a], None)
+    b = _pred("A magnitude 6 earthquake strikes near Tokyo this week", 0.6, horizon="week",
+              precal_probability=0.6)
+    led.record_forecasts([b], None)
+    assert b.id == a.id
+    led.resolve(a.id, "yes", 1.0, "", method="deterministic")
+    assert led.calibration_pairs() == {"week": [(0.6, 1.0)]}    # not the 0.4 average
+    assert led.forecasts[a.id]["probability"] == pytest.approx(0.4)   # Brier uses the average
+
+
+def test_hydrate_shows_latest_wording(tmp_path, monkeypatch):
+    from engine import pipeline, runtime
+    from engine.state import STATE
+    led = Ledger(path=tmp_path / "l.jsonl")
+    monkeypatch.setattr(runtime, "ledger", led)
+    monkeypatch.setattr(STATE, "predictions", [])
+    a = _pred("Magnitude 6 earthquake strikes near Tokyo", 0.2, horizon="week")
+    led.record_forecasts([a], None)
+    led.record_forecasts([_pred("A magnitude 6 earthquake strikes near Tokyo this week", 0.6,
+                                horizon="week")], None)
+    pipeline.hydrate_from_ledger()
+    p = STATE.predictions[0]
+    assert p.statement.endswith("this week") and p.probability == 0.6

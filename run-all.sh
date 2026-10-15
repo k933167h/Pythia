@@ -40,7 +40,10 @@ stop_previous() {
   local f="$1" pid
   [ -f "$f" ] || return 0
   pid="$(cat "$f" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  # a stale PID file (crash, reboot) may now point at an unrelated process: only stop it
+  # if it still looks like ours
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+     && ps -p "$pid" -o command= 2>/dev/null | grep -Eq 'engine\.run|uv run|next|npm'; then
     echo "[pythia] stopping previous $(basename "$f" .pid) (pid $pid)"
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done

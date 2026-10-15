@@ -33,7 +33,7 @@ def hydrate_from_ledger() -> int:
             continue
         per_horizon[f["horizon"]] = n + 1
         preds.append(Prediction(
-            id=f["id"], statement=f["statement"], horizon=f["horizon"],
+            id=f["id"], statement=f.get("last_statement") or f["statement"], horizon=f["horizon"],
             probability=f.get("last_probability", f["probability"]),
             base_probability=f.get("base_probability"),
             reasoning=f.get("reasoning") or "", location=f.get("location") or "",

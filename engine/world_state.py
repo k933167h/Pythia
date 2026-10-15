@@ -98,6 +98,7 @@ def compact(text: str, budget: int) -> str:
             domains[-1][2].append(raw)
         else:                                # prose before any header — keep as a domain
             domains.append(("", "", [raw]))
-    if not domains:
-        return text[:budget].rsplit("\n", 1)[0]
-    return _render(domains, _select(domains, budget))
+    out = _render(domains, _select(domains, budget)) if domains else ""
+    if not out:   # budget smaller than any header + line: fall back to whole leading lines
+        out = text[:budget].rsplit("\n", 1)[0] if "\n" in text[:budget] else text[:budget]
+    return out

@@ -216,7 +216,7 @@ def _audit_denied(path: str, method: str, client: Optional[str], reason: str) ->
     # throttle: one audit line per client+reason per minute (a scanner shouldn't flood it)
     key = f"{client}:{reason}"
     now = time.monotonic()
-    if now - _last_denied.get(key, 0) < 60:
+    if now - _last_denied.get(key, float("-inf")) < 60:
         return
     _last_denied[key] = now
     if len(_last_denied) > 2000:                 # bound memory under a wide scan
